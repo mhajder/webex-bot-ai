@@ -7,7 +7,7 @@ packages = ["src"]
 
 [project]
 name = "webex-bot-ai"
-version = "0.0.1"
+version = "0.1.0"
 description = "AI Bot for Webex with thread context and MCP support"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
