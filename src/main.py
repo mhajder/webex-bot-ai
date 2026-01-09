@@ -209,7 +209,10 @@ def main() -> None:
 
         # Initialize the conversation database for the actual manager
         try:
-            loop = asyncio.get_event_loop()
+            # Use existing loop if MCP is enabled, otherwise create a new one
+            if not settings.mcp.enabled:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
             loop.run_until_complete(conversation_manager.initialize())
             log.info("Conversation database initialized and ready")
         except Exception as e:
