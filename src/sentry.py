@@ -7,6 +7,16 @@ will continue to work normally without any monitoring.
 
 import logging
 import os
+import warnings
+
+# Suppress Pydantic serialization warnings from LiteLLM's response models
+# These occur when Sentry's LiteLLM integration tries to serialize response objects
+warnings.filterwarnings(
+    "ignore",
+    message="Pydantic serializer warnings",
+    category=UserWarning,
+    module="pydantic.main",
+)
 
 logger = logging.getLogger(__name__)
 
