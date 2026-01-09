@@ -404,6 +404,39 @@ class AICommand(Command):
         Returns:
             List of response strings.
         """
+
+        # Set Sentry user context from Webex activity
+        try:
+            from src.sentry import set_user_context
+
+            user_id = None
+            email = None
+            username = None
+
+            # Extract user info from activity object
+            # Webex activity structure has user info nested under 'actor'
+            if isinstance(activity, dict):
+                actor = activity.get("actor", {})
+                if isinstance(actor, dict):
+                    # entryUUID is the unique user identifier
+                    user_id = actor.get("entryUUID") or actor.get("id")
+                    email = actor.get("emailAddress")
+                    username = actor.get("displayName")
+            else:
+                actor = getattr(activity, "actor", None)
+                if actor:
+                    user_id = getattr(actor, "entryUUID", None) or getattr(
+                        actor, "id", None
+                    )
+                    email = getattr(actor, "emailAddress", None)
+                    username = getattr(actor, "displayName", None)
+
+            if user_id:
+                set_user_context(user_id, email, username)
+                log.debug(f"Sentry user context set: user_id={user_id}, email={email}")
+        except Exception as e:
+            log.exception("Error setting Sentry user context: %s", e)
+
         if not message or not message.strip():
             log.warning("Received empty message")
             return ["Please ask me a question! Mention me with your query."]
