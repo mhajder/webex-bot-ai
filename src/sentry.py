@@ -151,17 +151,25 @@ def capture_exception(error: Exception) -> None:
         pass  # Sentry not installed, silently ignore
 
 
-def set_user_context(user_id: str, email: str | None = None) -> None:
+def set_user_context(
+    user_id: str, email: str | None = None, username: str | None = None
+) -> None:
     """Set user context for Sentry events.
 
     Args:
         user_id: The unique user identifier.
         email: Optional user email.
+        username: Optional display name.
     """
     try:
         import sentry_sdk
 
-        sentry_sdk.set_user({"id": user_id, "email": email})
+        user_data = {"id": user_id}
+        if email:
+            user_data["email"] = email
+        if username:
+            user_data["username"] = username
+        sentry_sdk.set_user(user_data)
     except ImportError:
         pass  # Sentry not installed, silently ignore
 
