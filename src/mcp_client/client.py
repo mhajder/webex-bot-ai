@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
-from src.mcp.types import MCPTool, MCPToolResult
+from src.mcp_client.types import MCPTool, MCPToolResult
 
 log = logging.getLogger(__name__)
 
@@ -136,8 +136,8 @@ class MCPMultiClient:
             self._connected = True
             return True
 
-        except ImportError:
-            log.error("FastMCP not installed. Run: uv add fastmcp")
+        except ImportError as e:
+            log.error("FastMCP import error: %s. Run: uv add fastmcp", e)
             return False
         except Exception as e:
             log.exception(

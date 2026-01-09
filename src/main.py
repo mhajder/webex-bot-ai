@@ -18,7 +18,7 @@ from webex_bot.webex_bot import WebexBot
 from src.commands import AICommand
 from src.config import settings
 from src.conversation import ConversationManager
-from src.mcp import MCPMultiClient
+from src.mcp_client import MCPMultiClient
 from src.sentry import capture_exception, init_sentry
 
 load_dotenv()

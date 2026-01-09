@@ -13,8 +13,8 @@ from webex_bot.models.command import Command
 
 from src.config import settings
 from src.conversation.manager import ConversationManager
-from src.mcp.client import MCPMultiClient
-from src.mcp.types import MCPToolResult
+from src.mcp_client.client import MCPMultiClient
+from src.mcp_client.types import MCPToolResult
 from src.sentry import capture_exception, set_tag
 
 log = logging.getLogger(__name__)
