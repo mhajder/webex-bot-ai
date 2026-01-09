@@ -110,6 +110,7 @@ def init_sentry() -> bool:
             profile_session_sample_rate=profile_session_sample_rate,
             profile_lifecycle=profile_lifecycle,
             integrations=integrations,
+            enable_logs=enable_logs,
         )
 
         logger.info(
