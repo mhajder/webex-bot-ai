@@ -1,5 +1,7 @@
 FROM python:3.14-alpine3.24 AS builder
 
+RUN apk add --no-cache build-base libffi-dev
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_DOWNLOADS=0
