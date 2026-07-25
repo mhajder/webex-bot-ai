@@ -33,7 +33,7 @@ RUN apk add --no-cache ca-certificates \
     && addgroup -g 1000 appuser \
     && adduser -D -u 1000 -G appuser appuser
 
-COPY --from=builder --chown=appuser:appuser /app /app
+COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 
 WORKDIR /app
 
