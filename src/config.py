@@ -254,6 +254,8 @@ class Settings(BaseSettings):
             "openrouter": "OPENROUTER_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "claude": "ANTHROPIC_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+            "google": "GEMINI_API_KEY",
             "azure": "AZURE_API_KEY",
             "cohere": "COHERE_API_KEY",
             "groq": "GROQ_API_KEY",
@@ -282,7 +284,7 @@ class Settings(BaseSettings):
         if not api_key_found:
             errors.append(
                 "API key required for the configured model. "
-                "Set OPENAI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, "
+                "Set OPENAI_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, "
                 "COHERE_API_KEY, GROQ_API_KEY, AZURE_API_KEY, or LLM_API_KEY."
             )
 

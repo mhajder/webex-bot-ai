@@ -5,13 +5,13 @@ A conversational AI bot for Webex that:
 - 🤖 Responds to user mentions with AI-generated answers
 - 💬 Maintains conversation context within threads
 - 🔧 Integrates with MCP (Model Context Protocol) servers for extended capabilities
-- 🌐 Supports multiple LLM providers via LiteLLM (OpenAI, Ollama, OpenRouter, Anthropic, etc.)
+- 🌐 Supports multiple LLM providers via LiteLLM (OpenAI, Google Gemini, Ollama, OpenRouter, Anthropic, etc.)
 
 ## Features
 
 - **Thread-aware conversations**: The bot remembers context within Webex threads, allowing natural follow-up questions
 - **Smart mention handling**: The bot recognizes its own name and doesn't confuse it with questions
-- **Multiple LLM providers**: Use OpenAI, Ollama (local/cloud), OpenRouter, Anthropic, or any LiteLLM-supported provider
+- **Multiple LLM providers**: Use OpenAI, Google Gemini, Ollama (local/cloud), OpenRouter, Anthropic, or any LiteLLM-supported provider
 - **MCP Integration**: Connect to multiple MCP servers via HTTP for extended tool capabilities
 - **Access control**: Restrict bot to approved users, domains, or rooms
 - **Clean code**: Follows Python best practices with ruff linting and formatting
@@ -23,7 +23,7 @@ A conversational AI bot for Webex that:
 - Python 3.11+
 - [UV](https://docs.astral.sh/uv/) package manager
 - Webex bot token ([create one here](https://developer.webex.com/my-apps))
-- API key for your LLM provider (e.g., OpenAI)
+- API key for your LLM provider (e.g., OpenAI, Gemini)
 
 ### Installation
 
