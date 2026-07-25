@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 import aiosqlite
 
@@ -86,7 +86,7 @@ class ConversationStore:
                     INSERT OR IGNORE INTO conversations (thread_id, created_at, updated_at)
                     VALUES (?, ?, ?)
                     """,
-                    (thread_id, datetime.now(), datetime.now()),
+                    (thread_id, datetime.now(UTC), datetime.now(UTC)),
                 )
 
                 # Save message
@@ -110,7 +110,7 @@ class ConversationStore:
                     """
                     UPDATE conversations SET updated_at = ? WHERE thread_id = ?
                     """,
-                    (datetime.now(), thread_id),
+                    (datetime.now(UTC), thread_id),
                 )
 
                 await db.commit()

@@ -146,7 +146,11 @@ def setup_commands(
 
     bot_name = settings.bot.name
 
-    if bot_name.lower() == "assistant" and hasattr(bot, "teams_bot_email"):
+    if (
+        bot_name.lower() == "assistant"
+        and hasattr(bot, "teams_bot_email")
+        and isinstance(bot.teams_bot_email, str)
+    ):
         email_part = bot.teams_bot_email.split("@")[0].split("-")[0]
         bot_name = email_part.title()
         log.info("Extracted bot name from email: %s", bot_name)

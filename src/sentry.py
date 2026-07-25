@@ -8,6 +8,7 @@ will continue to work normally without any monitoring.
 import logging
 import os
 import warnings
+from typing import Literal
 
 # Suppress Pydantic serialization warnings from LiteLLM's response models
 # These occur when Sentry's LiteLLM integration tries to serialize response objects
@@ -84,7 +85,10 @@ def init_sentry() -> bool:
         profile_session_sample_rate = float(
             os.getenv("SENTRY_PROFILE_SESSION_SAMPLE_RATE", "1.0")
         )
-        profile_lifecycle = os.getenv("SENTRY_PROFILE_LIFECYCLE", "trace")
+        raw_lifecycle = os.getenv("SENTRY_PROFILE_LIFECYCLE", "trace")
+        profile_lifecycle: Literal["manual", "trace"] = (
+            "manual" if raw_lifecycle == "manual" else "trace"
+        )
         enable_logs = _parse_bool(os.getenv("SENTRY_ENABLE_LOGS"), default=True)
 
         # Get package version for default release

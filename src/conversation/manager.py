@@ -5,7 +5,7 @@ import logging
 import sqlite3
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from threading import Lock
 from typing import Literal
 
@@ -198,6 +198,8 @@ class ConversationManager:
 
         messages = []
         try:
+            if not self.store:
+                return []
             conn = sqlite3.connect(self.store.db_path)
             cursor = conn.cursor()
             cursor.execute(
@@ -236,8 +238,12 @@ class ConversationManager:
         import json
 
         try:
+            if not self.store:
+                return
             conn = sqlite3.connect(self.store.db_path)
             cursor = conn.cursor()
+
+            now_iso = datetime.now(UTC).isoformat()
 
             # Ensure conversation exists
             cursor.execute(
@@ -245,7 +251,7 @@ class ConversationManager:
                 INSERT OR IGNORE INTO conversations (thread_id, created_at, updated_at)
                 VALUES (?, ?, ?)
                 """,
-                (thread_id, datetime.now().isoformat(), datetime.now().isoformat()),
+                (thread_id, now_iso, now_iso),
             )
 
             # Save message
@@ -269,7 +275,7 @@ class ConversationManager:
                 """
                 UPDATE conversations SET updated_at = ? WHERE thread_id = ?
                 """,
-                (datetime.now().isoformat(), thread_id),
+                (datetime.now(UTC).isoformat(), thread_id),
             )
 
             conn.commit()
@@ -301,8 +307,7 @@ class ConversationManager:
             messages.append({"role": "system", "content": system_prompt})
 
         # Add conversation history
-        for msg in self.get_history(thread_id):
-            messages.append(msg.to_api_format())
+        messages.extend(msg.to_api_format() for msg in self.get_history(thread_id))
 
         return messages
 
@@ -341,6 +346,8 @@ class ConversationManager:
     def _delete_thread_sync(self, thread_id: str) -> None:
         """Synchronously delete thread from database."""
         try:
+            if not self.store:
+                return
             conn = sqlite3.connect(self.store.db_path)
             cursor = conn.cursor()
             cursor.execute(

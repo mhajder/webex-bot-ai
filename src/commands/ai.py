@@ -197,7 +197,7 @@ class AICommand(Command):
         self,
         prompt: str,
         thread_id: str | None,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         """Build the messages list for the LLM API call.
 
         Includes:
@@ -236,7 +236,8 @@ class AICommand(Command):
         This runs the async MCP call in a separate thread to avoid
         event loop conflicts with webex_bot.
         """
-        if not self.mcp_client:
+        client = self.mcp_client
+        if not client:
             return MCPToolResult(
                 tool_name=tool_name,
                 success=False,
@@ -245,7 +246,7 @@ class AICommand(Command):
             )
 
         async def _async_call():
-            return await self.mcp_client.call_tool(tool_name, arguments)
+            return await client.call_tool(tool_name, arguments)
 
         try:
             future = _executor.submit(_run_async_in_thread, _async_call())
@@ -391,7 +392,7 @@ class AICommand(Command):
     def execute(
         self,
         message: str,
-        attachment_actions: Any,
+        attachment_actions: Any,  # noqa: ARG002
         activity: Any,
     ) -> list[str]:
         """Execute the AI command to respond to user message.
@@ -473,7 +474,7 @@ class AICommand(Command):
                 len(tools),
             )
 
-            completion = self._call_llm(messages, tools if tools else None)
+            completion = self._call_llm(messages, tools or None)
 
             if not completion.choices:
                 log.error("LLM returned empty choices")
@@ -675,9 +676,9 @@ class AICommand(Command):
 
     def pre_execute(
         self,
-        message: str,
-        attachment_actions: Any,
-        activity: Any,
+        message: str,  # noqa: ARG002
+        attachment_actions: Any,  # noqa: ARG002
+        activity: Any,  # noqa: ARG002
     ) -> str | None:
         """Optional pre-execution hook.
 

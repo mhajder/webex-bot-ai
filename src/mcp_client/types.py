@@ -21,10 +21,11 @@ class MCPTool:
 
         Handles tools with no parameters correctly by setting empty properties.
         """
-        # Ensure input_schema has proper structure
-        schema = self.input_schema
-        if not schema:
-            schema = {"type": "object", "properties": {}}
+        schema: dict[str, Any] = (
+            dict(self.input_schema)
+            if self.input_schema
+            else {"type": "object", "properties": {}}
+        )
 
         # If schema doesn't have properties, add empty ones
         if "properties" not in schema:

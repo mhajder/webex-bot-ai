@@ -223,10 +223,9 @@ class MCPMultiClient:
                 )
 
                 if hasattr(result, "content"):
-                    content_parts = []
-                    for item in result.content:
-                        if hasattr(item, "text"):
-                            content_parts.append(item.text)
+                    content_parts = [
+                        item.text for item in result.content if hasattr(item, "text")
+                    ]
                     result_text = (
                         "\n".join(content_parts) if content_parts else str(result)
                     )
