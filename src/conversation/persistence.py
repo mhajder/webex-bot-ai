@@ -199,17 +199,25 @@ class ConversationStore:
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
-                query = """
-                    SELECT role, content, timestamp, metadata
-                    FROM messages
-                    WHERE thread_id = ?
-                    ORDER BY timestamp ASC
-                """
-                params = (thread_id,)
-
                 if limit:
-                    query += " LIMIT ?"
+                    query = """
+                        SELECT role, content, timestamp, metadata FROM (
+                            SELECT role, content, timestamp, metadata
+                            FROM messages
+                            WHERE thread_id = ?
+                            ORDER BY timestamp DESC
+                            LIMIT ?
+                        ) ORDER BY timestamp ASC
+                    """
                     params = (thread_id, limit)
+                else:
+                    query = """
+                        SELECT role, content, timestamp, metadata
+                        FROM messages
+                        WHERE thread_id = ?
+                        ORDER BY timestamp ASC
+                    """
+                    params = (thread_id,)
 
                 cursor = await db.execute(query, params)
                 rows = await cursor.fetchall()
@@ -537,16 +545,25 @@ class ConversationStore:
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            query = """
-                SELECT role, content, timestamp, metadata
-                FROM messages
-                WHERE thread_id = ?
-                ORDER BY timestamp ASC
-            """
-            params: tuple = (thread_id,)
             if limit:
-                query += " LIMIT ?"
-                params = (thread_id, limit)
+                query = """
+                    SELECT role, content, timestamp, metadata FROM (
+                        SELECT role, content, timestamp, metadata
+                        FROM messages
+                        WHERE thread_id = ?
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                    ) ORDER BY timestamp ASC
+                """
+                params: tuple = (thread_id, limit)
+            else:
+                query = """
+                    SELECT role, content, timestamp, metadata
+                    FROM messages
+                    WHERE thread_id = ?
+                    ORDER BY timestamp ASC
+                """
+                params = (thread_id,)
             cursor.execute(query, params)
             rows = cursor.fetchall()
             conn.close()

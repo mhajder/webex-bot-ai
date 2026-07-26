@@ -80,6 +80,7 @@ class AICommand(Command):
         conversation_manager: ConversationManager | None = None,
         bot_name: str | None = None,
         mcp_client: MCPMultiClient | None = None,
+        bot: Any = None,
     ):
         """Initialize the AI command.
 
@@ -87,6 +88,7 @@ class AICommand(Command):
             conversation_manager: Shared conversation manager instance.
             bot_name: Bot name for mention handling (defaults to config value).
             mcp_client: MCP client for tool integration (optional).
+            bot: WebexBot instance (optional).
         """
         super().__init__(
             command_keyword="",
@@ -96,6 +98,7 @@ class AICommand(Command):
             ),
         )
 
+        self.webex_bot = bot
         self.bot_name = bot_name or settings.bot.name
         self.model = settings.llm.model
         self.temperature = settings.llm.temperature
@@ -405,10 +408,20 @@ class AICommand(Command):
             if tool_name.startswith(("tool.", "tool_")):
                 tool_name = tool_name[5:]
 
+            raw_args = tool_call.function.arguments
+            if isinstance(raw_args, dict):
+                arguments = raw_args
+            elif isinstance(raw_args, str) and raw_args.strip():
+                try:
+                    arguments = json.loads(raw_args)
+                except Exception:
+                    arguments = {}
+            else:
+                arguments = {}
+
             # Built-in search_room_history tool handling
             if tool_name == "search_room_history":
                 try:
-                    arguments = json.loads(tool_call.function.arguments or "{}")
                     query = (
                         arguments.get("query")
                         or arguments.get("q")
@@ -462,9 +475,6 @@ class AICommand(Command):
                     continue
 
             try:
-                # Parse arguments from JSON string
-                arguments = json.loads(tool_call.function.arguments or "{}")
-
                 # Validate arguments against the tool schema
                 if self.mcp_client:
                     # Get the tool definition to check its schema
@@ -764,6 +774,18 @@ class AICommand(Command):
             List of response strings.
         """
         self._set_sentry_context(activity)
+
+        if (
+            self.bot_name.lower() == "assistant"
+            and self.webex_bot
+            and hasattr(self.webex_bot, "teams_bot_email")
+            and isinstance(self.webex_bot.teams_bot_email, str)
+            and self.webex_bot.teams_bot_email
+        ):
+            email_part = self.webex_bot.teams_bot_email.split("@")[0].split("-")[0]
+            self.bot_name = email_part.title()
+            self._build_mention_patterns()
+            log.info("Extracted bot name from email: %s", self.bot_name)
 
         if not message or not message.strip():
             log.warning("Received empty message")

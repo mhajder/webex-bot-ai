@@ -78,8 +78,7 @@ class MCPMultiClient:
             # Store server info
             self._servers[name] = {
                 "url": url,
-                "transport": transport,
-                "client": None,
+                "headers": request_headers,
                 "tools": [],
             }
 
@@ -231,7 +230,14 @@ class MCPMultiClient:
             if tool_name.startswith(f"{server_name}_"):
                 original_name = tool_name[len(f"{server_name}_") :]
 
-            async with Client(transport=server_info["transport"]) as client:
+            from fastmcp.client import StreamableHttpTransport
+
+            transport = StreamableHttpTransport(
+                url=server_info["url"],
+                headers=server_info.get("headers", {}),
+            )
+
+            async with Client(transport=transport) as client:
                 result = await asyncio.wait_for(
                     client.call_tool(original_name, arguments or {}),
                     timeout=self.timeout,

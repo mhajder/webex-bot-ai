@@ -5,7 +5,7 @@ import inspect
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from threading import Lock
 from typing import Literal
 
@@ -35,7 +35,7 @@ class ConversationManager:
         summary_threshold: int = 50,
         keep_recent_messages: int = 20,
         summary_model: str | None = None,
-        summary_llm_callable: Callable[[str], str] | None = None,
+        summary_llm_callable: Callable[[str], str | Awaitable[str]] | None = None,
     ):
         """Initialize the conversation manager.
 
@@ -126,23 +126,18 @@ class ConversationManager:
                 len(self._history[thread_id]),
             )
 
-        # Persist to database asynchronously
+        # Persist to database asynchronously if a running loop is present in the current thread
         if self.enable_persistence and self.store:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Event loop is running, create task
-                    task = asyncio.create_task(
-                        self.store.save_message(thread_id, message, room_id=room_id)
-                    )
-                    self._persistence_tasks.add(task)
-                    task.add_done_callback(self._persistence_tasks.discard)
-                else:
-                    # Event loop exists but not running, use sync save
-                    self.store.save_message_sync(thread_id, message, room_id=room_id)
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(
+                    self.store.save_message(thread_id, message, room_id=room_id)
+                )
+                self._persistence_tasks.add(task)
+                task.add_done_callback(self._persistence_tasks.discard)
             except RuntimeError:
-                # No event loop in current thread, fall back to sync save
-                log.debug("Event loop not available, using sync persistence")
+                # No running event loop in current thread, fall back to sync save
+                log.debug("No running event loop in thread, using sync persistence")
                 try:
                     self.store.save_message_sync(thread_id, message, room_id=room_id)
                 except Exception as sync_error:
@@ -163,13 +158,12 @@ class ConversationManager:
     def trigger_summarization_task(self, thread_id: str) -> None:
         """Trigger async background summarization task if event loop is running."""
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                task = asyncio.create_task(self.summarize_thread_history(thread_id))
-                self._persistence_tasks.add(task)
-                task.add_done_callback(self._persistence_tasks.discard)
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self.summarize_thread_history(thread_id))
+            self._persistence_tasks.add(task)
+            task.add_done_callback(self._persistence_tasks.discard)
         except RuntimeError:
-            log.debug("Event loop not available for background summarization")
+            log.debug("No running event loop in thread for background summarization")
         except Exception as e:
             log.exception("Failed to schedule background summarization task: %s", e)
 
@@ -260,13 +254,14 @@ class ConversationManager:
                 len(to_summarize),
             )
 
+            new_summary: str = ""
             if self._summary_llm_callable:
                 if inspect.iscoroutinefunction(self._summary_llm_callable):
-                    new_summary = await self._summary_llm_callable(prompt)
+                    res = await self._summary_llm_callable(prompt)
+                    new_summary = str(res) if res else ""
                 else:
-                    new_summary = await asyncio.to_thread(
-                        self._summary_llm_callable, prompt
-                    )
+                    res = await asyncio.to_thread(self._summary_llm_callable, prompt)
+                    new_summary = str(res) if res else ""
             else:
                 new_summary = await asyncio.to_thread(
                     self._generate_summary_llm, prompt
@@ -292,10 +287,14 @@ class ConversationManager:
 
             if self.enable_persistence and self.store:
                 try:
-                    if self._persistence_tasks:
-                        await asyncio.gather(
-                            *list(self._persistence_tasks), return_exceptions=True
-                        )
+                    current_task = asyncio.current_task()
+                    pending_tasks = [
+                        t
+                        for t in self._persistence_tasks
+                        if t is not current_task and not t.done()
+                    ]
+                    if pending_tasks:
+                        await asyncio.gather(*pending_tasks, return_exceptions=True)
                     await self.store.save_thread_summary(thread_id, new_summary)
                     await self.store.trim_old_messages(
                         thread_id, keep_count=self.keep_recent_messages
@@ -486,8 +485,12 @@ class ConversationManager:
         if not thread_id:
             return
 
-        if self._persistence_tasks:
-            await asyncio.gather(*list(self._persistence_tasks), return_exceptions=True)
+        current_task = asyncio.current_task()
+        pending_tasks = [
+            t for t in self._persistence_tasks if t is not current_task and not t.done()
+        ]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
         with self._lock:
             self._clear_thread(thread_id)

@@ -163,6 +163,7 @@ def setup_commands(
         conversation_manager=conversation_manager,
         bot_name=bot_name,
         mcp_client=mcp_client,
+        bot=bot,
     )
 
     bot.commands.clear()
