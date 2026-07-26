@@ -194,29 +194,20 @@ def main() -> None:
 
     mcp_client = None
     conversation_manager = None
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     try:
-        # For MCP setup, create an event loop but don't close it
-        # webex_bot will need it for its websocket operations
         if settings.mcp.enabled:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             mcp_client = loop.run_until_complete(setup_mcp_servers())
-            # Keep the loop open for webex_bot to use
-        else:
-            mcp_client = None
 
         bot = create_bot()
 
         # Setup commands and get the conversation manager instance
         conversation_manager = setup_commands(bot, mcp_client)
 
-        # Initialize the conversation database for the actual manager
+        # Initialize the conversation database
         try:
-            # Use existing loop if MCP is enabled, otherwise create a new one
-            if not settings.mcp.enabled:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
             loop.run_until_complete(conversation_manager.initialize())
             log.info("Conversation database initialized and ready")
         except Exception as e:
@@ -232,6 +223,14 @@ def main() -> None:
         log.exception("Bot error: %s", e)
         capture_exception(e)
         sys.exit(1)
+    finally:
+        if mcp_client and mcp_client.is_connected:
+            try:
+                log.info("Cleaning up MCP connections...")
+                loop.run_until_complete(mcp_client.disconnect())
+                log.info("MCP connections closed successfully")
+            except Exception as e:
+                log.warning("Error during MCP disconnect: %s", e)
 
 
 if __name__ == "__main__":

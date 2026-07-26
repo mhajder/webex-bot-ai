@@ -146,13 +146,14 @@ class MCPMultiClient:
             return False
 
     async def disconnect(self, name: str | None = None) -> None:
-        """Disconnect from MCP server(s).
+        """Disconnect from MCP server(s) and clean up resources.
 
         Args:
             name: Server name to disconnect from. If None, disconnects from all.
         """
         if name:
             if name in self._servers:
+                server_info = self._servers.pop(name)
                 tools_to_remove = [
                     t for t, s in self._tool_server_map.items() if s == name
                 ]
@@ -160,10 +161,24 @@ class MCPMultiClient:
                     self._tools.pop(tool_name, None)
                     self._tool_server_map.pop(tool_name, None)
 
-                del self._servers[name]
+                # Close transport if close method exists
+                transport = server_info.get("transport")
+                if hasattr(transport, "close") and callable(transport.close):
+                    try:
+                        if asyncio.iscoroutinefunction(transport.close):
+                            await transport.close()
+                        else:
+                            transport.close()
+                    except Exception as e:
+                        log.debug(
+                            "Error closing transport for server '%s': %s", name, e
+                        )
+
                 log.info("Disconnected from MCP server '%s'", name)
         else:
-            self._servers.clear()
+            server_names = list(self._servers.keys())
+            for s_name in server_names:
+                await self.disconnect(s_name)
             self._tools.clear()
             self._tool_server_map.clear()
             self._connected = False

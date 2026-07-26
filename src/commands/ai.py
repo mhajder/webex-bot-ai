@@ -389,6 +389,207 @@ class AICommand(Command):
 
         return litellm.completion(**kwargs)
 
+    def _set_sentry_context(self, activity: Any) -> None:
+        """Extract user info from activity and set Sentry user context."""
+        try:
+            from src.sentry import set_user_context
+
+            user_id = None
+            email = None
+            username = None
+
+            if isinstance(activity, dict):
+                actor = activity.get("actor", {})
+                if isinstance(actor, dict):
+                    user_id = actor.get("entryUUID") or actor.get("id")
+                    email = actor.get("emailAddress")
+                    username = actor.get("displayName")
+            else:
+                actor = getattr(activity, "actor", None)
+                if actor:
+                    user_id = getattr(actor, "entryUUID", None) or getattr(
+                        actor, "id", None
+                    )
+                    email = getattr(actor, "emailAddress", None)
+                    username = getattr(actor, "displayName", None)
+
+            if user_id:
+                set_user_context(user_id, email, username)
+                log.debug(
+                    "Sentry user context set: user_id=%s, email=%s", user_id, email
+                )
+        except Exception as e:
+            log.exception("Error setting Sentry user context: %s", e)
+
+    def _handle_native_tool_calls(
+        self,
+        choice: Any,
+        messages: list[dict],
+    ) -> str | None:
+        """Handle native function call-based tool execution from LLM.
+
+        Returns updated response content string, or None if no native tool calls occurred.
+        """
+        if not (
+            hasattr(choice.message, "tool_calls")
+            and choice.message.tool_calls
+            and self.mcp_client
+        ):
+            return None
+
+        log.info("LLM made %d function call(s)", len(choice.message.tool_calls))
+        tool_results = self._handle_tool_calls(choice.message.tool_calls)
+
+        if not tool_results:
+            return None
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": choice.message.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in choice.message.tool_calls
+                ],
+            }
+        )
+
+        for tool_call in choice.message.tool_calls:
+            result = tool_results.get(tool_call.id, "Tool execution failed")
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": str(result),
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Based on the tool results above, please provide a clear and "
+                    "concise response to the user's original question. Do NOT call "
+                    "any tools. Just respond with text."
+                ),
+            }
+        )
+
+        log.info("Sending tool results back to LLM")
+        completion = self._call_llm(messages, tools=None)
+        if completion.choices:
+            return completion.choices[0].message.content
+        return None
+
+    def _handle_json_tool_calls(
+        self,
+        response_content: str,
+        messages: list[dict],
+    ) -> str | None:
+        """Handle JSON-mode tool calls from non-native LLM providers (e.g. Ollama).
+
+        Returns updated response content string, or None if no JSON tool call occurred.
+        """
+        if not (response_content and self.mcp_client):
+            return None
+
+        try:
+            json_str = response_content.strip()
+
+            if "```json" in json_str:
+                start = json_str.find("```json") + 7
+                end = json_str.find("```", start)
+                if end > start:
+                    json_str = json_str[start:end].strip()
+            elif "```" in json_str:
+                start = json_str.find("```") + 3
+                end = json_str.find("```", start)
+                if end > start:
+                    json_str = json_str[start:end].strip()
+
+            json_data = json.loads(json_str)
+
+            if (
+                isinstance(json_data, dict)
+                and "name" in json_data
+                and "arguments" in json_data
+            ):
+                log.info("✅ Detected JSON-mode tool call: %s", json_data["name"])
+                log.debug(
+                    "Raw JSON-mode tool call data: %s",
+                    json.dumps(json_data, indent=2),
+                )
+
+                tool_arguments = json_data["arguments"]
+
+                if not isinstance(tool_arguments, dict):
+                    try:
+                        if isinstance(tool_arguments, str):
+                            tool_arguments = json.loads(tool_arguments)
+                        else:
+                            log.warning(
+                                "Tool arguments for '%s' is not a dict or JSON string: %s",
+                                json_data["name"],
+                                type(tool_arguments),
+                            )
+                            tool_arguments = {}
+                    except json.JSONDecodeError as e:
+                        log.warning(
+                            "Failed to parse tool arguments as JSON for '%s': %s",
+                            json_data["name"],
+                            e,
+                        )
+                        tool_arguments = {}
+
+                tool_call = type(
+                    "ToolCall",
+                    (),
+                    {
+                        "id": "json_call_0",
+                        "function": type(
+                            "Function",
+                            (),
+                            {
+                                "name": json_data["name"],
+                                "arguments": json.dumps(tool_arguments),
+                            },
+                        )(),
+                    },
+                )()
+
+                tool_results = self._handle_tool_calls([tool_call])
+
+                if tool_results:
+                    messages.append({"role": "assistant", "content": ""})
+                    result = tool_results.get("json_call_0", "Tool execution failed")
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Tool '{json_data['name']}' returned: {result}\n\n"
+                                "Based on this tool result, please provide a clear and "
+                                "concise response to the user's original question. "
+                                "Do NOT call any tools. Just respond with text."
+                            ),
+                        }
+                    )
+
+                    log.info("Sending tool results back to LLM")
+                    completion = self._call_llm(messages, tools=None)
+                    if completion.choices:
+                        return completion.choices[0].message.content
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            pass
+
+        return None
+
     def execute(
         self,
         message: str,
@@ -405,45 +606,13 @@ class AICommand(Command):
         Returns:
             List of response strings.
         """
-
-        # Set Sentry user context from Webex activity
-        try:
-            from src.sentry import set_user_context
-
-            user_id = None
-            email = None
-            username = None
-
-            # Extract user info from activity object
-            # Webex activity structure has user info nested under 'actor'
-            if isinstance(activity, dict):
-                actor = activity.get("actor", {})
-                if isinstance(actor, dict):
-                    # entryUUID is the unique user identifier
-                    user_id = actor.get("entryUUID") or actor.get("id")
-                    email = actor.get("emailAddress")
-                    username = actor.get("displayName")
-            else:
-                actor = getattr(activity, "actor", None)
-                if actor:
-                    user_id = getattr(actor, "entryUUID", None) or getattr(
-                        actor, "id", None
-                    )
-                    email = getattr(actor, "emailAddress", None)
-                    username = getattr(actor, "displayName", None)
-
-            if user_id:
-                set_user_context(user_id, email, username)
-                log.debug(f"Sentry user context set: user_id={user_id}, email={email}")
-        except Exception as e:
-            log.exception("Error setting Sentry user context: %s", e)
+        self._set_sentry_context(activity)
 
         if not message or not message.strip():
             log.warning("Received empty message")
             return ["Please ask me a question! Mention me with your query."]
 
         log.info("Raw message: '%s'", message[:100])
-
         prompt = self._clean_prompt(message.strip())
 
         if not prompt:
@@ -481,169 +650,16 @@ class AICommand(Command):
                 return ["I'm sorry, I couldn't generate a response. Please try again."]
 
             choice = completion.choices[0]
-            response_content = choice.message.content
+            raw_content = choice.message.content
 
-            # Handle function call-based tool calls
-            if (
-                hasattr(choice.message, "tool_calls")
-                and choice.message.tool_calls
-                and self.mcp_client
-            ):
-                log.info("LLM made %d function call(s)", len(choice.message.tool_calls))
+            # Attempt native or JSON tool call handling
+            updated_content = self._handle_native_tool_calls(choice, messages)
+            if updated_content is None:
+                updated_content = self._handle_json_tool_calls(raw_content, messages)
 
-                tool_results = self._handle_tool_calls(choice.message.tool_calls)
-
-                if tool_results:
-                    # Add assistant message with tool calls
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": choice.message.content or "",
-                            "tool_calls": [
-                                {
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.function.name,
-                                        "arguments": tc.function.arguments,
-                                    },
-                                }
-                                for tc in choice.message.tool_calls
-                            ],
-                        }
-                    )
-
-                    # Add tool results
-                    for tool_call in choice.message.tool_calls:
-                        result = tool_results.get(tool_call.id, "Tool execution failed")
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": str(result),
-                            }
-                        )
-
-                    # Add explicit instruction to respond with text, not call tools
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": "Based on the tool results above, please provide a clear and concise response to the user's original question. Do NOT call any tools. Just respond with text.",
-                        }
-                    )
-
-                    # Get final response from LLM with tool results
-                    log.info("Sending tool results back to LLM")
-                    completion = self._call_llm(messages, tools=None)
-                    if completion.choices:
-                        response_content = completion.choices[0].message.content
-
-            # Handle JSON-mode tool calls from Ollama
-            elif response_content and self.mcp_client:
-                # Try to parse JSON tool calls from the response content
-                try:
-                    json_str = response_content.strip()
-
-                    # Try to extract JSON from markdown code blocks
-                    if "```json" in json_str:
-                        start = json_str.find("```json") + 7
-                        end = json_str.find("```", start)
-                        if end > start:
-                            json_str = json_str[start:end].strip()
-                    elif "```" in json_str:
-                        start = json_str.find("```") + 3
-                        end = json_str.find("```", start)
-                        if end > start:
-                            json_str = json_str[start:end].strip()
-
-                    json_data = json.loads(json_str)
-
-                    # Check if this is a tool call
-                    if (
-                        isinstance(json_data, dict)
-                        and "name" in json_data
-                        and "arguments" in json_data
-                    ):
-                        log.info(
-                            "✅ Detected JSON-mode tool call: %s", json_data["name"]
-                        )
-
-                        # Debug: Log the raw JSON to diagnose parameter issues
-                        log.debug(
-                            "Raw JSON-mode tool call data: %s",
-                            json.dumps(json_data, indent=2),
-                        )
-
-                        # Extract arguments - handle case where arguments might be nested incorrectly
-                        tool_arguments = json_data["arguments"]
-
-                        # If arguments is not a dict, try to parse it as JSON string
-                        if not isinstance(tool_arguments, dict):
-                            try:
-                                if isinstance(tool_arguments, str):
-                                    tool_arguments = json.loads(tool_arguments)
-                                else:
-                                    log.warning(
-                                        "Tool arguments for '%s' is not a dict or JSON string: %s",
-                                        json_data["name"],
-                                        type(tool_arguments),
-                                    )
-                                    tool_arguments = {}
-                            except json.JSONDecodeError as e:
-                                log.warning(
-                                    "Failed to parse tool arguments as JSON for '%s': %s",
-                                    json_data["name"],
-                                    e,
-                                )
-                                tool_arguments = {}
-
-                        # Create a tool call object and handle it
-                        tool_call = type(
-                            "ToolCall",
-                            (),
-                            {
-                                "id": "json_call_0",
-                                "function": type(
-                                    "Function",
-                                    (),
-                                    {
-                                        "name": json_data["name"],
-                                        "arguments": json.dumps(tool_arguments),
-                                    },
-                                )(),
-                            },
-                        )()
-
-                        tool_results = self._handle_tool_calls([tool_call])
-
-                        if tool_results:
-                            # Add assistant message with tool call
-                            messages.append(
-                                {
-                                    "role": "assistant",
-                                    "content": "",
-                                }
-                            )
-
-                            # Add tool result
-                            result = tool_results.get(
-                                "json_call_0", "Tool execution failed"
-                            )
-                            messages.append(
-                                {
-                                    "role": "user",
-                                    "content": f"Tool '{json_data['name']}' returned: {result}\n\nBased on this tool result, please provide a clear and concise response to the user's original question. Do NOT call any tools. Just respond with text.",
-                                }
-                            )
-
-                            # Get final response from LLM with tool results
-                            log.info("Sending tool results back to LLM")
-                            completion = self._call_llm(messages, tools=None)
-                            if completion.choices:
-                                response_content = completion.choices[0].message.content
-                except (json.JSONDecodeError, ValueError, AttributeError):
-                    # Not a valid tool call, treat as regular response
-                    pass
+            response_content = (
+                updated_content if updated_content is not None else raw_content
+            )
 
             if not response_content or not response_content.strip():
                 log.error("LLM returned empty content")
@@ -661,7 +677,6 @@ class AICommand(Command):
                 )
 
             log.info("Response generated (%d chars)", len(response_content))
-
             return [quote_info(response_content)]
 
         except Exception as e:
@@ -680,8 +695,5 @@ class AICommand(Command):
         attachment_actions: Any,  # noqa: ARG002
         activity: Any,  # noqa: ARG002
     ) -> str | None:
-        """Optional pre-execution hook.
-
-        Can be used to send a "thinking" indicator for long-running requests.
-        """
+        """Optional pre-execution hook."""
         return None

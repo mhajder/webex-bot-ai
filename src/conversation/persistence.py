@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sqlite3
 from datetime import UTC, datetime
 
 import aiosqlite
@@ -258,3 +259,94 @@ class ConversationStore:
         except Exception as e:
             log.exception("Failed to cleanup old threads: %s", e)
             raise
+
+    def save_message_sync(self, thread_id: str, message: Message) -> None:
+        """Synchronously save a message to database (fallback when async is unavailable)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            now_iso = datetime.now(UTC).isoformat()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO conversations (thread_id, created_at, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (thread_id, now_iso, now_iso),
+            )
+            metadata_json = json.dumps(message.metadata)
+            cursor.execute(
+                """
+                INSERT INTO messages (thread_id, role, content, timestamp, metadata)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    message.role,
+                    message.content,
+                    message.timestamp,
+                    metadata_json,
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE conversations SET updated_at = ? WHERE thread_id = ?
+                """,
+                (datetime.now(UTC).isoformat(), thread_id),
+            )
+            conn.commit()
+            conn.close()
+            log.debug("Sync-saved %s message to thread %s", message.role, thread_id)
+        except sqlite3.OperationalError as e:
+            log.debug("Database not ready for sync save: %s", e)
+        except Exception as e:
+            log.exception("Failed to sync-save message for thread %s: %s", thread_id, e)
+
+    def load_thread_sync(
+        self, thread_id: str, limit: int | None = None
+    ) -> list[Message]:
+        """Synchronously load thread messages from database."""
+        messages = []
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            query = """
+                SELECT role, content, timestamp, metadata
+                FROM messages
+                WHERE thread_id = ?
+                ORDER BY timestamp ASC
+            """
+            params: tuple = (thread_id,)
+            if limit:
+                query += " LIMIT ?"
+                params = (thread_id, limit)
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            conn.close()
+
+            for role, content, timestamp, metadata_json in rows:
+                metadata = json.loads(metadata_json) if metadata_json else {}
+                messages.append(
+                    Message(
+                        role=role,
+                        content=content,
+                        timestamp=timestamp,
+                        metadata=metadata,
+                    )
+                )
+            return messages
+        except sqlite3.OperationalError:
+            return []
+
+    def delete_thread_sync(self, thread_id: str) -> None:
+        """Synchronously delete thread from database."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM conversations WHERE thread_id = ?", (thread_id,)
+            )
+            conn.commit()
+            conn.close()
+            log.debug("Deleted thread %s from database", thread_id)
+        except sqlite3.OperationalError:
+            pass

@@ -2,10 +2,8 @@
 
 import asyncio
 import logging
-import sqlite3
 import time
 from collections import defaultdict
-from datetime import UTC, datetime
 from threading import Lock
 from typing import Literal
 
@@ -112,12 +110,12 @@ class ConversationManager:
                     task.add_done_callback(self._persistence_tasks.discard)
                 else:
                     # Event loop exists but not running, use sync save
-                    self._save_message_sync(thread_id, message)
+                    self.store.save_message_sync(thread_id, message)
             except RuntimeError:
                 # No event loop in current thread, fall back to sync save
                 log.debug("Event loop not available, using sync persistence")
                 try:
-                    self._save_message_sync(thread_id, message)
+                    self.store.save_message_sync(thread_id, message)
                 except Exception as sync_error:
                     log.exception(
                         "Failed to sync-persist message for thread %s: %s",
@@ -169,7 +167,9 @@ class ConversationManager:
         # If no in-memory history and persistence is enabled, load from DB synchronously
         if self.enable_persistence and self.store:
             try:
-                history = self._load_thread_sync(thread_id)
+                history = self.store.load_thread_sync(
+                    thread_id, limit=self.max_messages
+                )
                 if history:
                     with self._lock:
                         self._history[thread_id] = history
@@ -187,104 +187,6 @@ class ConversationManager:
                 return []
 
         return []
-
-    def _load_thread_sync(self, thread_id: str) -> list[Message]:
-        """Synchronously load thread messages from database.
-
-        This method uses sqlite3 directly to avoid event loop issues
-        when called from webex_bot's threading context.
-        """
-        import json
-
-        messages = []
-        try:
-            if not self.store:
-                return []
-            conn = sqlite3.connect(self.store.db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT role, content, timestamp, metadata
-                FROM messages
-                WHERE thread_id = ?
-                ORDER BY timestamp ASC
-                LIMIT ?
-                """,
-                (thread_id, self.max_messages),
-            )
-            rows = cursor.fetchall()
-            conn.close()
-
-            for role, content, timestamp, metadata_json in rows:
-                metadata = json.loads(metadata_json) if metadata_json else {}
-                message = Message(
-                    role=role,
-                    content=content,
-                    timestamp=timestamp,
-                    metadata=metadata,
-                )
-                messages.append(message)
-
-            return messages
-        except sqlite3.OperationalError:
-            # Database doesn't exist yet
-            return []
-
-    def _save_message_sync(self, thread_id: str, message: Message) -> None:
-        """Synchronously save a message to database.
-
-        This is a fallback when async save is not available.
-        """
-        import json
-
-        try:
-            if not self.store:
-                return
-            conn = sqlite3.connect(self.store.db_path)
-            cursor = conn.cursor()
-
-            now_iso = datetime.now(UTC).isoformat()
-
-            # Ensure conversation exists
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO conversations (thread_id, created_at, updated_at)
-                VALUES (?, ?, ?)
-                """,
-                (thread_id, now_iso, now_iso),
-            )
-
-            # Save message
-            metadata_json = json.dumps(message.metadata)
-            cursor.execute(
-                """
-                INSERT INTO messages (thread_id, role, content, timestamp, metadata)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    thread_id,
-                    message.role,
-                    message.content,
-                    message.timestamp,
-                    metadata_json,
-                ),
-            )
-
-            # Update conversation's updated_at
-            cursor.execute(
-                """
-                UPDATE conversations SET updated_at = ? WHERE thread_id = ?
-                """,
-                (datetime.now(UTC).isoformat(), thread_id),
-            )
-
-            conn.commit()
-            conn.close()
-            log.debug("Sync-saved %s message to thread %s", message.role, thread_id)
-        except sqlite3.OperationalError as e:
-            log.debug("Database not ready for sync save: %s", e)
-        except Exception as e:
-            log.exception("Failed to sync-save message for thread %s: %s", thread_id, e)
 
     def get_messages_for_api(
         self,
@@ -337,28 +239,11 @@ class ConversationManager:
         # Also delete from database
         if self.enable_persistence and self.store:
             try:
-                self._delete_thread_sync(thread_id)
+                self.store.delete_thread_sync(thread_id)
             except Exception as e:
                 log.exception(
                     "Failed to delete thread %s from database: %s", thread_id, e
                 )
-
-    def _delete_thread_sync(self, thread_id: str) -> None:
-        """Synchronously delete thread from database."""
-        try:
-            if not self.store:
-                return
-            conn = sqlite3.connect(self.store.db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM conversations WHERE thread_id = ?", (thread_id,)
-            )
-            conn.commit()
-            conn.close()
-            log.debug("Deleted thread %s from database", thread_id)
-        except sqlite3.OperationalError:
-            # Database doesn't exist yet
-            pass
 
     def _clear_thread(self, thread_id: str) -> None:
         """Internal method to clear thread (must be called with lock held)."""
