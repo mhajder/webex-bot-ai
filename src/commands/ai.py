@@ -29,6 +29,10 @@ _executor = concurrent.futures.ThreadPoolExecutor(
 _OLLAMA_MODEL_DEFAULTS = {
     "supports_function_calling": True,
     "mode": "chat",
+    "input_cost_per_token": 0.0,
+    "output_cost_per_token": 0.0,
+    "cache_creation_input_token_cost": 0.0,
+    "cache_read_input_token_cost": 0.0,
 }
 
 # Register Ollama models with LiteLLM
