@@ -177,6 +177,56 @@ class AICommand(Command):
         log.warning("Could not extract thread ID from activity")
         return None
 
+    def _get_room_id(self, activity: Any) -> str | None:
+        """Extract Webex roomId from activity payload with fallback."""
+        if not activity:
+            return None
+
+        if isinstance(activity, dict):
+            # Direct keys
+            if activity.get("roomId"):
+                return activity["roomId"]
+            if activity.get("room_id"):
+                return activity["room_id"]
+
+            # Nested keys in Webex webhook activity payloads
+            for nested_key in ("target", "data", "raw", "message"):
+                nested = activity.get(nested_key)
+                if isinstance(nested, dict):
+                    room_id = (
+                        nested.get("roomId")
+                        or nested.get("room_id")
+                        or nested.get("id")
+                    )
+                    if room_id:
+                        return room_id
+        else:
+            # Attribute access for Webex Activity objects
+            for attr in ("roomId", "room_id"):
+                if hasattr(activity, attr):
+                    val = getattr(activity, attr)
+                    if val:
+                        return val
+
+            for nested_attr in ("target", "data", "raw", "message"):
+                if hasattr(activity, nested_attr):
+                    nested = getattr(activity, nested_attr)
+                    if isinstance(nested, dict):
+                        val = (
+                            nested.get("roomId")
+                            or nested.get("room_id")
+                            or nested.get("id")
+                        )
+                        if val:
+                            return val
+                    elif hasattr(nested, "id") and nested.id:
+                        return nested.id
+                    elif hasattr(nested, "roomId") and nested.roomId:
+                        return nested.roomId
+
+        # Fallback to thread_id if room_id cannot be explicitly extracted
+        return self._get_thread_id(activity)
+
     def _clean_prompt(self, prompt: str) -> str:
         """Remove bot mentions from the prompt.
 
@@ -197,12 +247,14 @@ class AICommand(Command):
         self,
         prompt: str,
         thread_id: str | None,
+        room_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the messages list for the LLM API call.
 
         Includes:
         - System prompt with bot identity
         - Conversation history from this thread
+        - Relevant past room context (via SQLite FTS5 search)
         - Current user message
         """
         system_prompt = settings.llm.get_system_prompt(self.bot_name)
@@ -212,22 +264,79 @@ class AICommand(Command):
             system_prompt=system_prompt,
         )
 
+        # Augment with relevant room history via FTS5 if room_id is present
+        if room_id and prompt:
+            past_matches = self.conversation_manager.search_room_history_sync(
+                room_id=room_id,
+                query=prompt,
+                limit=3,
+            )
+
+            # Filter out messages that are already in the current thread history
+            existing_contents = {
+                m.get("content") for m in messages if isinstance(m, dict)
+            }
+            relevant_snippets = [
+                f"[{msg.role}]: {msg.content}"
+                for msg in past_matches
+                if msg.content not in existing_contents
+            ]
+
+            if relevant_snippets:
+                context_block = (
+                    "[Relevant Past Discussion Context in this Webex Space]\n"
+                    + "\n".join(relevant_snippets)
+                )
+                log.info(
+                    "Augmenting prompt with %d historical room matches for room %s",
+                    len(relevant_snippets),
+                    room_id,
+                )
+                messages.append({"role": "system", "content": context_block})
+
         messages.append({"role": "user", "content": prompt})
 
         return messages
 
     def _get_mcp_tools(self) -> list[dict]:
-        """Get available MCP tools formatted for LiteLLM function calling.
+        """Get available tools (MCP tools + built-in tools) formatted for LiteLLM.
 
         Works for all models:
         - OpenAI: Returns native tool_calls
         - Ollama: Returns JSON in content that we parse
         """
-        if not self.mcp_client or not self.mcp_client.available_tools:
-            return []
+        tools = []
+        if self.mcp_client and self.mcp_client.available_tools:
+            tools.extend(self.mcp_client.get_tools_for_litellm())
 
-        tools = self.mcp_client.get_tools_for_litellm()
-        log.info("Including %d MCP tools in API request", len(tools))
+        if self.conversation_manager and self.conversation_manager.enable_persistence:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_room_history",
+                        "description": (
+                            "Search historical messages and past discussions across all threads "
+                            "in the current Webex space using keyword search. Use this tool when "
+                            "a user explicitly asks to search chat history, look up past error "
+                            "solutions, or recall previously posted configurations, URLs, or information."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Keywords or search terms to look up in space history.",
+                                },
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                }
+            )
+
+        if tools:
+            log.info("Including %d tools in API request", len(tools))
         return tools
 
     def _call_mcp_tool(self, tool_name: str, arguments: dict) -> MCPToolResult:
@@ -271,11 +380,14 @@ class AICommand(Command):
                 error=str(e),
             )
 
-    def _handle_tool_calls(self, tool_calls: list) -> dict[str, str]:
-        """Handle LLM function calls to MCP tools.
+    def _handle_tool_calls(
+        self, tool_calls: list, room_id: str | None = None
+    ) -> dict[str, str]:
+        """Handle LLM function calls to MCP and built-in tools.
 
         Args:
             tool_calls: List of tool calls from the LLM response.
+            room_id: Optional Webex room ID for room-scoped search tools.
 
         Returns:
             Dictionary mapping tool call IDs to their results.
@@ -289,7 +401,48 @@ class AICommand(Command):
             if tool_name.startswith(("tool.", "tool_")):
                 tool_name = tool_name[5:]
 
-            # Validate that the tool exists
+            # Built-in search_room_history tool handling
+            if tool_name == "search_room_history":
+                try:
+                    arguments = json.loads(tool_call.function.arguments or "{}")
+                    query = (
+                        arguments.get("query")
+                        or arguments.get("q")
+                        or arguments.get("search_term")
+                        or arguments.get("keywords")
+                        or arguments.get("text")
+                        or ""
+                    )
+                    if room_id and query:
+                        matches = self.conversation_manager.search_room_history_sync(
+                            room_id=room_id, query=query, limit=5
+                        )
+                        if matches:
+                            formatted = "\n".join(
+                                f"[{m.role}]: {m.content}" for m in matches
+                            )
+                            results[tool_call.id] = (
+                                f"Found {len(matches)} matching historical messages in this Webex space:\n{formatted}"
+                            )
+                        else:
+                            results[tool_call.id] = (
+                                f"No historical messages matching '{query}' were found in this Webex space."
+                            )
+                    else:
+                        results[tool_call.id] = (
+                            f"Search failed: room_id='{room_id}' or query='{query}' was missing."
+                        )
+                    log.info(
+                        "Executed built-in tool 'search_room_history' for query '%s' in room %s",
+                        query,
+                        room_id,
+                    )
+                except Exception as e:
+                    log.exception("Error executing search_room_history tool: %s", e)
+                    results[tool_call.id] = f"Error executing room search: {e}"
+                continue
+
+            # Validate that the MCP tool exists
             if self.mcp_client:
                 tool_exists = any(
                     tool.name == tool_name for tool in self.mcp_client.available_tools
@@ -425,20 +578,19 @@ class AICommand(Command):
         self,
         choice: Any,
         messages: list[dict],
+        room_id: str | None = None,
     ) -> str | None:
         """Handle native function call-based tool execution from LLM.
 
         Returns updated response content string, or None if no native tool calls occurred.
         """
-        if not (
-            hasattr(choice.message, "tool_calls")
-            and choice.message.tool_calls
-            and self.mcp_client
-        ):
+        if not (hasattr(choice.message, "tool_calls") and choice.message.tool_calls):
             return None
 
         log.info("LLM made %d function call(s)", len(choice.message.tool_calls))
-        tool_results = self._handle_tool_calls(choice.message.tool_calls)
+        tool_results = self._handle_tool_calls(
+            choice.message.tool_calls, room_id=room_id
+        )
 
         if not tool_results:
             return None
@@ -492,12 +644,13 @@ class AICommand(Command):
         self,
         response_content: str,
         messages: list[dict],
+        room_id: str | None = None,
     ) -> str | None:
         """Handle JSON-mode tool calls from non-native LLM providers (e.g. Ollama).
 
         Returns updated response content string, or None if no JSON tool call occurred.
         """
-        if not (response_content and self.mcp_client):
+        if not response_content:
             return None
 
         try:
@@ -564,7 +717,7 @@ class AICommand(Command):
                     },
                 )()
 
-                tool_results = self._handle_tool_calls([tool_call])
+                tool_results = self._handle_tool_calls([tool_call], room_id=room_id)
 
                 if tool_results:
                     messages.append({"role": "assistant", "content": ""})
@@ -620,10 +773,11 @@ class AICommand(Command):
             return ["Please ask me a question! I'm here to help."]
 
         thread_id = self._get_thread_id(activity)
+        room_id = self._get_room_id(activity)
 
         log.info("=" * 60)
         log.info("PROCESSING MESSAGE")
-        log.info("Thread ID: %s", thread_id)
+        log.info("Thread ID: %s, Room ID: %s", thread_id, room_id)
         log.info(
             "Has history: %s",
             self.conversation_manager.has_history(thread_id) if thread_id else False,
@@ -632,7 +786,7 @@ class AICommand(Command):
         log.info("=" * 60)
 
         try:
-            messages = self._build_messages(prompt, thread_id)
+            messages = self._build_messages(prompt, thread_id, room_id=room_id)
             tools = self._get_mcp_tools()
 
             log.info(
@@ -653,9 +807,13 @@ class AICommand(Command):
             raw_content = choice.message.content
 
             # Attempt native or JSON tool call handling
-            updated_content = self._handle_native_tool_calls(choice, messages)
+            updated_content = self._handle_native_tool_calls(
+                choice, messages, room_id=room_id
+            )
             if updated_content is None:
-                updated_content = self._handle_json_tool_calls(raw_content, messages)
+                updated_content = self._handle_json_tool_calls(
+                    raw_content, messages, room_id=room_id
+                )
 
             response_content = (
                 updated_content if updated_content is not None else raw_content
@@ -666,13 +824,16 @@ class AICommand(Command):
                 return ["I'm sorry, I received an empty response. Please try again."]
 
             if thread_id:
-                self.conversation_manager.add_user_message(thread_id, prompt)
+                self.conversation_manager.add_user_message(
+                    thread_id, prompt, room_id=room_id
+                )
                 self.conversation_manager.add_assistant_message(
-                    thread_id, response_content
+                    thread_id, response_content, room_id=room_id
                 )
                 log.info(
-                    "Saved conversation to thread %s. Total: %d messages",
+                    "Saved conversation to thread %s (room %s). Total: %d messages",
                     thread_id,
+                    room_id,
                     self.conversation_manager.get_message_count(thread_id),
                 )
 

@@ -61,6 +61,7 @@ class ConversationManager:
         role: Literal["user", "assistant", "system", "tool"],
         content: str,
         metadata: dict | None = None,
+        room_id: str | None = None,
     ) -> None:
         """Add a message to the conversation history.
 
@@ -69,6 +70,7 @@ class ConversationManager:
             role: Message role ("user", "assistant", "system", "tool").
             content: Message content.
             metadata: Optional metadata dictionary.
+            room_id: Optional Webex room identifier.
         """
         if not thread_id:
             log.warning("Cannot add message: thread_id is None")
@@ -91,9 +93,10 @@ class ConversationManager:
                 ]
 
             log.debug(
-                "Added %s message to thread %s. Total messages: %d",
+                "Added %s message to thread %s (room %s). Total messages: %d",
                 role,
                 thread_id,
+                room_id,
                 len(self._history[thread_id]),
             )
 
@@ -104,18 +107,18 @@ class ConversationManager:
                 if loop.is_running():
                     # Event loop is running, create task
                     task = asyncio.create_task(
-                        self.store.save_message(thread_id, message)
+                        self.store.save_message(thread_id, message, room_id=room_id)
                     )
                     self._persistence_tasks.add(task)
                     task.add_done_callback(self._persistence_tasks.discard)
                 else:
                     # Event loop exists but not running, use sync save
-                    self.store.save_message_sync(thread_id, message)
+                    self.store.save_message_sync(thread_id, message, room_id=room_id)
             except RuntimeError:
                 # No event loop in current thread, fall back to sync save
                 log.debug("Event loop not available, using sync persistence")
                 try:
-                    self.store.save_message_sync(thread_id, message)
+                    self.store.save_message_sync(thread_id, message, room_id=room_id)
                 except Exception as sync_error:
                     log.exception(
                         "Failed to sync-persist message for thread %s: %s",
@@ -127,13 +130,25 @@ class ConversationManager:
                     "Failed to create persistence task for thread %s: %s", thread_id, e
                 )
 
-    def add_user_message(self, thread_id: str, content: str) -> None:
+    def add_user_message(
+        self, thread_id: str, content: str, room_id: str | None = None
+    ) -> None:
         """Add a user message to the history."""
-        self.add_message(thread_id, "user", content)
+        self.add_message(thread_id, "user", content, room_id=room_id)
 
-    def add_assistant_message(self, thread_id: str, content: str) -> None:
+    def add_assistant_message(
+        self, thread_id: str, content: str, room_id: str | None = None
+    ) -> None:
         """Add an assistant message to the history."""
-        self.add_message(thread_id, "assistant", content)
+        self.add_message(thread_id, "assistant", content, room_id=room_id)
+
+    def search_room_history_sync(
+        self, room_id: str, query: str, limit: int = 5
+    ) -> list[Message]:
+        """Search room history synchronously using FTS5."""
+        if not self.enable_persistence or not self.store:
+            return []
+        return self.store.search_room_history_sync(room_id, query, limit=limit)
 
     def get_history(self, thread_id: str) -> list[Message]:
         """Get the conversation history for a thread.

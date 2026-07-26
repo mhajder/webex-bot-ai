@@ -1,7 +1,9 @@
 """SQLite-based persistence layer for conversation history."""
 
+import contextlib
 import json
 import logging
+import re
 import sqlite3
 from datetime import UTC, datetime
 
@@ -36,6 +38,7 @@ class ConversationStore:
                     """
                     CREATE TABLE IF NOT EXISTS conversations (
                         thread_id TEXT PRIMARY KEY,
+                        room_id TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -48,6 +51,7 @@ class ConversationStore:
                     CREATE TABLE IF NOT EXISTS messages (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         thread_id TEXT NOT NULL,
+                        room_id TEXT,
                         role TEXT NOT NULL,
                         content TEXT NOT NULL,
                         timestamp REAL NOT NULL,
@@ -58,47 +62,107 @@ class ConversationStore:
                     """
                 )
 
-                # Create index for faster queries
+                # Auto-migrate columns if database existed before room_id
+                with contextlib.suppress(Exception):
+                    await db.execute(
+                        "ALTER TABLE conversations ADD COLUMN room_id TEXT"
+                    )
+
+                with contextlib.suppress(Exception):
+                    await db.execute("ALTER TABLE messages ADD COLUMN room_id TEXT")
+
+                # Create indexes for faster queries
                 await db.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_messages_thread_id
                     ON messages(thread_id)
                     """
                 )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_messages_room_id
+                    ON messages(room_id)
+                    """
+                )
+
+                # Create SQLite FTS5 Virtual Table for room-wide message search
+                try:
+                    await db.execute(
+                        """
+                        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                            content,
+                            thread_id UNINDEXED,
+                            room_id UNINDEXED,
+                            role UNINDEXED,
+                            tokenize='porter unicode61'
+                        );
+                        """
+                    )
+
+                    # Triggers to keep FTS table synchronized with messages
+                    await db.execute(
+                        """
+                        CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+                            INSERT INTO messages_fts(rowid, content, thread_id, room_id, role)
+                            VALUES (new.id, new.content, new.thread_id, new.room_id, new.role);
+                        END;
+                        """
+                    )
+                    await db.execute(
+                        """
+                        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                            INSERT INTO messages_fts(messages_fts, rowid, content, thread_id, room_id, role)
+                            VALUES('delete', old.id, old.content, old.thread_id, old.room_id, old.role);
+                        END;
+                        """
+                    )
+                except Exception as fts_err:
+                    log.warning(
+                        "FTS5 table initialization skipped/not supported: %s", fts_err
+                    )
 
                 await db.commit()
-                log.info("Database initialized at %s", self.db_path)
+                log.info(
+                    "Database initialized at %s with FTS5 search support", self.db_path
+                )
         except Exception as e:
             log.exception("Failed to initialize database: %s", e)
             raise
 
-    async def save_message(self, thread_id: str, message: Message) -> None:
+    async def save_message(
+        self, thread_id: str, message: Message, room_id: str | None = None
+    ) -> None:
         """Save a message to the database.
 
         Args:
             thread_id: The thread identifier.
             message: The message to save.
+            room_id: Optional Webex room identifier.
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 # Ensure conversation exists
                 await db.execute(
                     """
-                    INSERT OR IGNORE INTO conversations (thread_id, created_at, updated_at)
-                    VALUES (?, ?, ?)
+                    INSERT INTO conversations (thread_id, room_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        room_id=COALESCE(excluded.room_id, conversations.room_id),
+                        updated_at=excluded.updated_at
                     """,
-                    (thread_id, datetime.now(UTC), datetime.now(UTC)),
+                    (thread_id, room_id, datetime.now(UTC), datetime.now(UTC)),
                 )
 
                 # Save message
                 metadata_json = json.dumps(message.metadata)
                 await db.execute(
                     """
-                    INSERT INTO messages (thread_id, role, content, timestamp, metadata)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO messages (thread_id, room_id, role, content, timestamp, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         thread_id,
+                        room_id,
                         message.role,
                         message.content,
                         message.timestamp,
@@ -106,16 +170,13 @@ class ConversationStore:
                     ),
                 )
 
-                # Update conversation's updated_at timestamp
-                await db.execute(
-                    """
-                    UPDATE conversations SET updated_at = ? WHERE thread_id = ?
-                    """,
-                    (datetime.now(UTC), thread_id),
-                )
-
                 await db.commit()
-                log.debug("Saved %s message to thread %s", message.role, thread_id)
+                log.debug(
+                    "Saved %s message to thread %s (room %s)",
+                    message.role,
+                    thread_id,
+                    room_id,
+                )
         except Exception as e:
             log.exception("Failed to save message for thread %s: %s", thread_id, e)
             raise
@@ -260,7 +321,88 @@ class ConversationStore:
             log.exception("Failed to cleanup old threads: %s", e)
             raise
 
-    def save_message_sync(self, thread_id: str, message: Message) -> None:
+    async def search_room_history(
+        self, room_id: str, query: str, limit: int = 5
+    ) -> list[Message]:
+        """Search past messages in a Webex room using SQLite FTS5 with LIKE fallback.
+
+        Args:
+            room_id: Webex room/space identifier.
+            query: Search query terms.
+            limit: Maximum matching messages to return.
+
+        Returns:
+            List of matching Message objects with metadata.
+        """
+        if not room_id or not query or not query.strip():
+            return []
+
+        clean_terms = re.findall(r"[\w.-]+", query)
+        clean_query = " ".join(clean_terms) if clean_terms else query.strip()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Try FTS5 search first
+                try:
+                    cursor = await db.execute(
+                        """
+                        SELECT m.role, m.content, m.timestamp, m.metadata, m.thread_id
+                        FROM messages_fts f
+                        JOIN messages m ON f.rowid = m.id
+                        WHERE f.room_id = ? AND messages_fts MATCH ?
+                        ORDER BY rank
+                        LIMIT ?
+                        """,
+                        (room_id, clean_query, limit),
+                    )
+                    rows = await cursor.fetchall()
+                    if rows:
+                        return [
+                            Message(
+                                role=r[0],
+                                content=r[1],
+                                timestamp=r[2],
+                                metadata={
+                                    **(json.loads(r[3]) if r[3] else {}),
+                                    "thread_id": r[4],
+                                },
+                            )
+                            for r in rows
+                        ]
+                except Exception as fts_e:
+                    log.debug("FTS5 match failed, falling back to LIKE: %s", fts_e)
+
+                # Fallback to standard LIKE search
+                cursor = await db.execute(
+                    """
+                    SELECT role, content, timestamp, metadata, thread_id
+                    FROM messages
+                    WHERE room_id = ? AND content LIKE ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    (room_id, f"%{clean_query}%", limit),
+                )
+                rows = await cursor.fetchall()
+                return [
+                    Message(
+                        role=r[0],
+                        content=r[1],
+                        timestamp=r[2],
+                        metadata={
+                            **(json.loads(r[3]) if r[3] else {}),
+                            "thread_id": r[4],
+                        },
+                    )
+                    for r in rows
+                ]
+        except Exception as e:
+            log.warning("Failed room search for '%s' in room %s: %s", query, room_id, e)
+            return []
+
+    def save_message_sync(
+        self, thread_id: str, message: Message, room_id: str | None = None
+    ) -> None:
         """Synchronously save a message to database (fallback when async is unavailable)."""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -268,38 +410,116 @@ class ConversationStore:
             now_iso = datetime.now(UTC).isoformat()
             cursor.execute(
                 """
-                INSERT OR IGNORE INTO conversations (thread_id, created_at, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO conversations (thread_id, room_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    room_id=COALESCE(excluded.room_id, conversations.room_id),
+                    updated_at=excluded.updated_at
                 """,
-                (thread_id, now_iso, now_iso),
+                (thread_id, room_id, now_iso, now_iso),
             )
             metadata_json = json.dumps(message.metadata)
             cursor.execute(
                 """
-                INSERT INTO messages (thread_id, role, content, timestamp, metadata)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO messages (thread_id, room_id, role, content, timestamp, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     thread_id,
+                    room_id,
                     message.role,
                     message.content,
                     message.timestamp,
                     metadata_json,
                 ),
             )
-            cursor.execute(
-                """
-                UPDATE conversations SET updated_at = ? WHERE thread_id = ?
-                """,
-                (datetime.now(UTC).isoformat(), thread_id),
-            )
             conn.commit()
             conn.close()
-            log.debug("Sync-saved %s message to thread %s", message.role, thread_id)
+            log.debug(
+                "Sync-saved %s message to thread %s (room %s)",
+                message.role,
+                thread_id,
+                room_id,
+            )
         except sqlite3.OperationalError as e:
             log.debug("Database not ready for sync save: %s", e)
         except Exception as e:
             log.exception("Failed to sync-save message for thread %s: %s", thread_id, e)
+
+    def search_room_history_sync(
+        self, room_id: str, query: str, limit: int = 5
+    ) -> list[Message]:
+        """Synchronously search past messages in a Webex room using SQLite FTS5 with LIKE fallback."""
+        if not room_id or not query or not query.strip():
+            return []
+
+        clean_terms = re.findall(r"[\w.-]+", query)
+        clean_query = " ".join(clean_terms) if clean_terms else query.strip()
+
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # Try FTS5 search first
+            try:
+                cursor.execute(
+                    """
+                    SELECT m.role, m.content, m.timestamp, m.metadata, m.thread_id
+                    FROM messages_fts f
+                    JOIN messages m ON f.rowid = m.id
+                    WHERE f.room_id = ? AND messages_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (room_id, clean_query, limit),
+                )
+                rows = cursor.fetchall()
+                if rows:
+                    conn.close()
+                    return [
+                        Message(
+                            role=r[0],
+                            content=r[1],
+                            timestamp=r[2],
+                            metadata={
+                                **(json.loads(r[3]) if r[3] else {}),
+                                "thread_id": r[4],
+                            },
+                        )
+                        for r in rows
+                    ]
+            except sqlite3.OperationalError as fts_e:
+                log.debug("FTS search fallback to LIKE: %s", fts_e)
+
+            # Fallback to LIKE search
+            cursor.execute(
+                """
+                SELECT role, content, timestamp, metadata, thread_id
+                FROM messages
+                WHERE room_id = ? AND content LIKE ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (room_id, f"%{clean_query}%", limit),
+            )
+            rows = cursor.fetchall()
+            conn.close()
+
+            return [
+                Message(
+                    role=r[0],
+                    content=r[1],
+                    timestamp=r[2],
+                    metadata={
+                        **(json.loads(r[3]) if r[3] else {}),
+                        "thread_id": r[4],
+                    },
+                )
+                for r in rows
+            ]
+        except Exception as e:
+            log.warning("Sync room search failed: %s", e)
+            return []
 
     def load_thread_sync(
         self, thread_id: str, limit: int | None = None
