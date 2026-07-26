@@ -10,6 +10,8 @@ A conversational AI bot for Webex that:
 ## Features
 
 - **Thread-aware conversations**: The bot remembers context within Webex threads, allowing natural follow-up questions
+- **Rolling thread summarization**: Background tasks summarize older messages as threads grow, preserving context indefinitely without hitting context limits
+- **Room-wide history search**: Uses SQLite FTS5 keyword search to look up past messages, solutions, and context across Webex space history
 - **Smart mention handling**: The bot recognizes its own name and doesn't confuse it with questions
 - **Multiple LLM providers**: Use OpenAI, Google Gemini, Ollama (local/cloud), OpenRouter, Anthropic, or any LiteLLM-supported provider
 - **MCP Integration**: Connect to multiple MCP servers via HTTP for extended tool capabilities
@@ -88,12 +90,29 @@ webex-bot-ai
 | `LLM_MAX_TOKENS` | Maximum response tokens | `2048` |
 | `LLM_API_BASE` | Custom API endpoint | - |
 
+### Conversation Settings & Rolling Summarization
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CONVERSATION_ENABLE_PERSISTENCE` | Persist conversation threads to SQLite database | `true` |
+| `CONVERSATION_ENABLE_SUMMARIZATION` | Enable rolling thread summarization for long threads | `true` |
+| `CONVERSATION_SUMMARY_THRESHOLD` | Message count threshold to trigger rolling summarization | `50` |
+| `CONVERSATION_KEEP_RECENT_MESSAGES` | Number of recent messages retained verbatim after summary | `20` |
+| `CONVERSATION_SUMMARY_MODEL` | Optional distinct LLM model for thread summarization | Same as `LLM_MODEL` |
+| `CONVERSATION_MAX_HISTORY_MESSAGES` | Maximum in-memory history messages | `50` |
+| `CONVERSATION_TIMEOUT_HOURS` | Hours before a thread is considered stale | `24` |
+| `CONVERSATION_DB_PATH` | SQLite database file path | `conversations.db` |
+
 ### Model Examples
 
 ```env
 # OpenAI
 LLM_MODEL=gpt-4o-mini
 OPENAI_API_KEY=sk-...
+
+# Google Gemini
+LLM_MODEL=gemini/gemini-2.5-flash
+GEMINI_API_KEY=AIzaSy...
 
 # Ollama (local)
 LLM_MODEL=ollama_chat/gpt-oss:120b
