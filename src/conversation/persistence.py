@@ -62,10 +62,15 @@ class ConversationStore:
                     """
                 )
 
-                # Auto-migrate columns if database existed before room_id
+                # Auto-migrate columns if database existed before room_id or thread_summary
                 with contextlib.suppress(Exception):
                     await db.execute(
                         "ALTER TABLE conversations ADD COLUMN room_id TEXT"
+                    )
+
+                with contextlib.suppress(Exception):
+                    await db.execute(
+                        "ALTER TABLE conversations ADD COLUMN thread_summary TEXT"
                     )
 
                 with contextlib.suppress(Exception):
@@ -111,8 +116,7 @@ class ConversationStore:
                     await db.execute(
                         """
                         CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                            INSERT INTO messages_fts(messages_fts, rowid, content, thread_id, room_id, role)
-                            VALUES('delete', old.id, old.content, old.thread_id, old.room_id, old.role);
+                            DELETE FROM messages_fts WHERE rowid = old.id;
                         END;
                         """
                     )
@@ -235,6 +239,10 @@ class ConversationStore:
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "DELETE FROM messages WHERE thread_id = ?",
+                    (thread_id,),
+                )
                 await db.execute(
                     "DELETE FROM conversations WHERE thread_id = ?",
                     (thread_id,),
@@ -562,6 +570,7 @@ class ConversationStore:
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM messages WHERE thread_id = ?", (thread_id,))
             cursor.execute(
                 "DELETE FROM conversations WHERE thread_id = ?", (thread_id,)
             )
@@ -570,3 +579,134 @@ class ConversationStore:
             log.debug("Deleted thread %s from database", thread_id)
         except sqlite3.OperationalError:
             pass
+
+    async def save_thread_summary(self, thread_id: str, summary: str) -> None:
+        """Save or update the thread summary in database."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """
+                    INSERT INTO conversations (thread_id, thread_summary, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        thread_summary = excluded.thread_summary,
+                        updated_at = excluded.updated_at
+                    """,
+                    (thread_id, summary, datetime.now(UTC)),
+                )
+                await db.commit()
+                log.debug("Saved thread summary for thread %s", thread_id)
+        except Exception as e:
+            log.exception("Failed to save summary for thread %s: %s", thread_id, e)
+
+    def save_thread_summary_sync(self, thread_id: str, summary: str) -> None:
+        """Synchronously save or update the thread summary in database."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            now_iso = datetime.now(UTC).isoformat()
+            cursor.execute(
+                """
+                INSERT INTO conversations (thread_id, thread_summary, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    thread_summary = excluded.thread_summary,
+                    updated_at = excluded.updated_at
+                """,
+                (thread_id, summary, now_iso),
+            )
+            conn.commit()
+            conn.close()
+            log.debug("Sync-saved thread summary for thread %s", thread_id)
+        except Exception as e:
+            log.exception("Failed to sync-save summary for thread %s: %s", thread_id, e)
+
+    async def get_thread_summary(self, thread_id: str) -> str | None:
+        """Get the thread summary from database."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT thread_summary FROM conversations WHERE thread_id = ?",
+                    (thread_id,),
+                )
+                row = await cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception as e:
+            log.exception("Failed to get summary for thread %s: %s", thread_id, e)
+            return None
+
+    def get_thread_summary_sync(self, thread_id: str) -> str | None:
+        """Synchronously get the thread summary from database."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT thread_summary FROM conversations WHERE thread_id = ?",
+                (thread_id,),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row and row[0] else None
+        except Exception as e:
+            log.exception("Failed to sync-get summary for thread %s: %s", thread_id, e)
+            return None
+
+    async def trim_old_messages(self, thread_id: str, keep_count: int) -> int:
+        """Trim messages for thread_id to keep only the most recent keep_count.
+
+        Returns:
+            Number of messages deleted.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE thread_id = ? AND id NOT IN (
+                        SELECT id FROM (
+                            SELECT id FROM messages
+                            WHERE thread_id = ?
+                            ORDER BY timestamp DESC, id DESC
+                            LIMIT ?
+                        )
+                    )
+                    """,
+                    (thread_id, thread_id, keep_count),
+                )
+                await db.commit()
+                deleted = cursor.rowcount
+                log.debug("Trimmed %d old messages for thread %s", deleted, thread_id)
+                return deleted
+        except Exception as e:
+            log.exception("Failed to trim messages for thread %s: %s", thread_id, e)
+            return 0
+
+    def trim_old_messages_sync(self, thread_id: str, keep_count: int) -> int:
+        """Synchronously trim messages for thread_id to keep only the most recent keep_count."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                DELETE FROM messages
+                WHERE thread_id = ? AND id NOT IN (
+                    SELECT id FROM (
+                        SELECT id FROM messages
+                        WHERE thread_id = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?
+                    )
+                )
+                """,
+                (thread_id, thread_id, keep_count),
+            )
+            conn.commit()
+            deleted = cursor.rowcount
+            conn.close()
+            log.debug("Sync-trimmed %d old messages for thread %s", deleted, thread_id)
+            return deleted
+        except Exception as e:
+            log.exception(
+                "Failed to sync-trim messages for thread %s: %s", thread_id, e
+            )
+            return 0

@@ -218,6 +218,23 @@ class ConversationSettings(BaseSettings):
     enable_persistence: bool = Field(
         default=True, description="Whether to persist conversations to database"
     )
+    enable_summarization: bool = Field(
+        default=True, description="Whether to enable rolling thread summarization"
+    )
+    summary_threshold: int = Field(
+        default=50,
+        ge=2,
+        description="Message count threshold to trigger rolling thread summarization",
+    )
+    keep_recent_messages: int = Field(
+        default=20,
+        ge=1,
+        description="Number of recent messages to retain verbatim after summarization",
+    )
+    summary_model: str | None = Field(
+        default=None,
+        description="Optional distinct LLM model identifier for thread summarization",
+    )
 
     @property
     def timeout_seconds(self) -> int:

@@ -142,6 +142,10 @@ def setup_commands(
         timeout_seconds=settings.conversation.timeout_seconds,
         db_path=settings.conversation.db_path,
         enable_persistence=settings.conversation.enable_persistence,
+        enable_summarization=settings.conversation.enable_summarization,
+        summary_threshold=settings.conversation.summary_threshold,
+        keep_recent_messages=settings.conversation.keep_recent_messages,
+        summary_model=settings.conversation.summary_model,
     )
 
     bot_name = settings.bot.name
