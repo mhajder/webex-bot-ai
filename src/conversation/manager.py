@@ -443,8 +443,16 @@ class ConversationManager:
                 }
             )
 
-        # Add conversation history
-        messages.extend(msg.to_api_format() for msg in self.get_history(thread_id))
+        # Add conversation history, consolidating consecutive same-role messages
+        raw_history = [msg.to_api_format() for msg in self.get_history(thread_id)]
+        consolidated: list[dict] = []
+        for msg in raw_history:
+            if consolidated and consolidated[-1]["role"] == msg["role"]:
+                consolidated[-1]["content"] += f"\n\n{msg['content']}"
+            else:
+                consolidated.append(dict(msg))
+
+        messages.extend(consolidated)
 
         return messages
 

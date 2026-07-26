@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 import litellm
@@ -141,107 +142,138 @@ class AICommand(Command):
             )
             self._alt_mention_patterns.append(alt_pattern)
 
-    def _get_thread_id(self, activity: Any) -> str | None:
-        """Extract thread ID from the activity object.
+    def _get_thread_id(
+        self, activity: Any, attachment_actions: Any = None
+    ) -> str | None:
+        """Extract valid Webex thread ID (parent message ID or message ID).
 
-        For thread replies, returns the parent message ID.
-        For new messages, returns the message ID itself.
+        Prioritizes the webexpythonsdk Message object (attachment_actions)
+        which contains actual Webex Base64 Message/Parent IDs rather than WebSocket event IDs.
         """
-        if not activity:
-            log.warning("Activity object is None")
-            return None
+        # 1. Check attachment_actions (webexpythonsdk Message object)
+        if attachment_actions:
+            inputs = getattr(attachment_actions, "inputs", None)
+            if isinstance(inputs, dict) and inputs.get("thread_parent_id"):
+                return inputs["thread_parent_id"]
 
-        if isinstance(activity, dict):
-            if (
-                "parent" in activity
-                and isinstance(activity["parent"], dict)
-                and "id" in activity["parent"]
-            ):
-                return activity["parent"]["id"]
+            parent_id = getattr(attachment_actions, "parentId", None) or getattr(
+                attachment_actions, "parent_id", None
+            )
+            if parent_id and isinstance(parent_id, str):
+                return parent_id
 
-            if activity.get("parentId"):
-                return activity["parentId"]
+            msg_id = getattr(attachment_actions, "id", None)
+            if msg_id and isinstance(msg_id, str):
+                return msg_id
 
-            if activity.get("id"):
-                return activity["id"]
-        else:
-            if hasattr(activity, "parent") and activity.parent:
-                parent = activity.parent
-                if isinstance(parent, dict) and "id" in parent:
-                    return parent["id"]
-                if hasattr(parent, "id") and parent.id:
-                    return parent.id
+        # 2. Check activity dict/object
+        if activity:
+            if isinstance(activity, dict):
+                if (
+                    "parent" in activity
+                    and isinstance(activity["parent"], dict)
+                    and "id" in activity["parent"]
+                    and activity["parent"].get("type") == "reply"
+                ):
+                    return activity["parent"]["id"]
 
-            for attr in ("parentId", "parent_id"):
-                if hasattr(activity, attr):
-                    value = getattr(activity, attr)
-                    if value:
-                        return value
+                if activity.get("parentId"):
+                    return activity["parentId"]
 
-            if hasattr(activity, "id") and activity.id:
-                return activity.id
+                if (
+                    "object" in activity
+                    and isinstance(activity["object"], dict)
+                    and "id" in activity["object"]
+                ):
+                    return activity["object"]["id"]
 
-        log.warning("Could not extract thread ID from activity")
+                if (
+                    "target" in activity
+                    and isinstance(activity["target"], dict)
+                    and "id" in activity["target"]
+                ):
+                    return activity["target"]["id"]
+            else:
+                if hasattr(activity, "parent") and activity.parent:
+                    parent = activity.parent
+                    if isinstance(parent, dict) and "id" in parent:
+                        return parent["id"]
+                    if hasattr(parent, "id") and parent.id:
+                        return parent.id
+
+                for attr in ("parentId", "parent_id"):
+                    if hasattr(activity, attr):
+                        value = getattr(activity, attr)
+                        if value:
+                            return value
+
+        log.warning("Could not extract thread ID from activity/attachment_actions")
         return None
 
-    def _get_room_id(self, activity: Any) -> str | None:
-        """Extract Webex roomId from activity payload with fallback."""
-        if not activity:
-            return None
-
-        if isinstance(activity, dict):
-            # Direct keys
-            if activity.get("roomId"):
-                return activity["roomId"]
-            if activity.get("room_id"):
-                return activity["room_id"]
-
-            # Nested keys in Webex webhook activity payloads
-            for nested_key in ("target", "data", "raw", "message"):
-                nested = activity.get(nested_key)
-                if isinstance(nested, dict):
-                    room_id = (
-                        nested.get("roomId")
-                        or nested.get("room_id")
-                        or nested.get("id")
-                    )
-                    if room_id:
-                        return room_id
-        else:
-            # Attribute access for Webex Activity objects
+    def _get_room_id(self, activity: Any, attachment_actions: Any = None) -> str | None:
+        """Extract Webex roomId from activity or attachment_actions payload with fallback."""
+        if attachment_actions:
             for attr in ("roomId", "room_id"):
-                if hasattr(activity, attr):
-                    val = getattr(activity, attr)
+                if hasattr(attachment_actions, attr):
+                    val = getattr(attachment_actions, attr)
                     if val:
                         return val
 
-            for nested_attr in ("target", "data", "raw", "message"):
-                if hasattr(activity, nested_attr):
-                    nested = getattr(activity, nested_attr)
+        if activity:
+            if isinstance(activity, dict):
+                if activity.get("roomId"):
+                    return activity["roomId"]
+                if activity.get("room_id"):
+                    return activity["room_id"]
+
+                for nested_key in ("target", "data", "raw", "message"):
+                    nested = activity.get(nested_key)
                     if isinstance(nested, dict):
-                        val = (
+                        room_id = (
                             nested.get("roomId")
                             or nested.get("room_id")
                             or nested.get("id")
                         )
+                        if room_id:
+                            return room_id
+            else:
+                for attr in ("roomId", "room_id"):
+                    if hasattr(activity, attr):
+                        val = getattr(activity, attr)
                         if val:
                             return val
-                    elif hasattr(nested, "id") and nested.id:
-                        return nested.id
-                    elif hasattr(nested, "roomId") and nested.roomId:
-                        return nested.roomId
+
+                for nested_attr in ("target", "data", "raw", "message"):
+                    if hasattr(activity, nested_attr):
+                        nested = getattr(activity, nested_attr)
+                        if isinstance(nested, dict):
+                            val = (
+                                nested.get("roomId")
+                                or nested.get("room_id")
+                                or nested.get("id")
+                            )
+                            if val:
+                                return val
+                        elif hasattr(nested, "id") and nested.id:
+                            return nested.id
+                        elif hasattr(nested, "roomId") and nested.roomId:
+                            return nested.roomId
 
         # Fallback to thread_id if room_id cannot be explicitly extracted
-        return self._get_thread_id(activity)
+        return self._get_thread_id(activity, attachment_actions)
 
     def _clean_prompt(self, prompt: str) -> str:
-        """Remove bot mentions from the prompt.
+        """Remove bot mentions and HTML tags from the prompt.
 
-        This ensures the AI doesn't get confused by its own name
-        appearing at the start of every message.
+        This ensures the AI doesn't get confused by HTML tags or its own name
+        appearing in messages.
         """
         if not prompt:
             return prompt
+
+        # Remove HTML tags if present (e.g. <p>, <spark-mention>)
+        if "<" in prompt and ">" in prompt:
+            prompt = re.sub(r"<[^>]+>", " ", prompt)
 
         prompt = self._mention_pattern.sub("", prompt).strip()
 
@@ -249,6 +281,248 @@ class AICommand(Command):
             prompt = pattern.sub("", prompt).strip()
 
         return prompt
+
+    def _fetch_parent_message_via_wdm(self, activity: Any) -> dict[str, Any] | None:
+        """Fetch parent message data directly via Webex WDM cluster endpoint.
+
+        This bypasses Webex REST API 404/403 geo-routing restrictions for EU/US clusters
+        by using the WDM cluster URL from the WebSocket activity payload.
+        """
+        if not isinstance(activity, dict):
+            return None
+
+        parent = activity.get("parent")
+        target = activity.get("target")
+        if not isinstance(parent, dict) or not isinstance(target, dict):
+            return None
+
+        parent_id = parent.get("id")
+        conv_url = target.get("url")
+        conv_target_id = target.get("id")
+
+        if not parent_id or not conv_url or not conv_target_id:
+            return None
+
+        try:
+            msg_url = conv_url.replace(
+                f"conversations/{conv_target_id}", f"messages/{parent_id}"
+            )
+            session = None
+            if self.webex_bot and hasattr(self.webex_bot, "websocket_client"):
+                session = getattr(self.webex_bot.websocket_client, "session", None)
+
+            if not session and self.webex_bot and hasattr(self.webex_bot, "teams"):
+                session = getattr(self.webex_bot.teams, "_session", None)
+
+            if not session:
+                return None
+
+            response = session.get(msg_url)
+            if response.status_code == 200:
+                data = response.json()
+                log.info(
+                    "Successfully fetched parent root message via WDM cluster: %s",
+                    data.get("id"),
+                )
+                return data
+            else:
+                log.debug(
+                    "WDM cluster request for parent %s returned HTTP %d",
+                    parent_id,
+                    response.status_code,
+                )
+        except Exception as e:
+            log.debug("Failed to fetch parent message via WDM: %s", e)
+
+        return None
+
+    def _sync_webex_thread_history(
+        self,
+        thread_id: str,
+        room_id: str,
+        current_msg_id: str | None = None,
+        activity: Any = None,
+    ) -> None:
+        """Fetch pre-existing Webex thread and room messages via Webex API / WDM cluster.
+
+        This catches up on unmentioned user messages posted in the space or thread
+        before the bot was pinged.
+        """
+        if not self.webex_bot or not hasattr(self.webex_bot, "teams"):
+            return
+
+        try:
+            teams = self.webex_bot.teams
+            bot_me = getattr(self, "_bot_me", None)
+            if not bot_me:
+                bot_me = teams.people.me()
+                self._bot_me = bot_me
+
+            bot_person_id = getattr(bot_me, "id", None)
+            bot_emails = getattr(bot_me, "emails", [])
+            bot_email = bot_emails[0] if bot_emails else ""
+
+            webex_messages = []
+            existing_ids = set()
+
+            # First try fetching parent message via direct WDM cluster endpoint
+            if activity and isinstance(activity, dict) and "parent" in activity:
+                wdm_parent = self._fetch_parent_message_via_wdm(activity)
+                if wdm_parent:
+                    raw_parent_text = (
+                        wdm_parent.get("text")
+                        or wdm_parent.get("markdown")
+                        or wdm_parent.get("html")
+                        or ""
+                    )
+                    if raw_parent_text.strip():
+                        cleaned_parent = self._clean_prompt(raw_parent_text.strip())
+                        if cleaned_parent:
+                            parent_sender_id = wdm_parent.get("personId")
+                            parent_sender_email = wdm_parent.get("personEmail")
+                            parent_is_bot = parent_sender_id == bot_person_id or (
+                                bot_email and parent_sender_email == bot_email
+                            )
+                            parent_role = "assistant" if parent_is_bot else "user"
+
+                            self.conversation_manager.add_message(
+                                thread_id=thread_id,
+                                role=parent_role,
+                                content=cleaned_parent,
+                                room_id=room_id,
+                            )
+                            log.info(
+                                "Synced parent root message via WDM: [%s] %s",
+                                parent_role,
+                                cleaned_parent[:50],
+                            )
+
+            # Fetch thread root message if thread_id is specified
+            if thread_id:
+                try:
+                    root_msg = teams.messages.get(messageId=thread_id)
+                    if root_msg and hasattr(root_msg, "id"):
+                        webex_messages.append(root_msg)
+                        existing_ids.add(root_msg.id)
+                except Exception as root_err:
+                    log.debug(
+                        "Could not fetch root thread message %s (Webex API restriction/404): %s",
+                        thread_id,
+                        root_err,
+                    )
+
+            # Fetch thread replies if thread_id is specified
+            if room_id and thread_id:
+                try:
+                    replies = list(
+                        teams.messages.list(roomId=room_id, parentId=thread_id, max=30)
+                    )
+                    webex_messages.extend(
+                        [
+                            r
+                            for r in replies
+                            if hasattr(r, "id") and r.id not in existing_ids
+                        ]
+                    )
+                    existing_ids.update(r.id for r in replies if hasattr(r, "id"))
+                except Exception as list_err:
+                    log.debug(
+                        "Could not fetch thread replies for thread %s: %s",
+                        thread_id,
+                        list_err,
+                    )
+
+            # Also fetch recent messages in the room/space if permitted
+            if room_id:
+                try:
+                    room_msgs = list(teams.messages.list(roomId=room_id, max=20))
+                    webex_messages.extend(
+                        [
+                            m
+                            for m in room_msgs
+                            if hasattr(m, "id") and m.id not in existing_ids
+                        ]
+                    )
+                    existing_ids.update(m.id for m in room_msgs if hasattr(m, "id"))
+                except Exception as room_err:
+                    log.debug(
+                        "Could not fetch room messages for room %s (Webex API 403/404): %s",
+                        room_id,
+                        room_err,
+                    )
+
+            if not webex_messages:
+                return
+
+            def get_created_timestamp(msg: Any) -> float:
+                created = getattr(msg, "created", None)
+                if isinstance(created, datetime):
+                    return created.timestamp()
+                if isinstance(created, str):
+                    try:
+                        return datetime.fromisoformat(created).timestamp()
+                    except ValueError:
+                        pass
+                return 0.0
+
+            webex_messages.sort(key=get_created_timestamp)
+
+            existing_history = self.conversation_manager.get_history(thread_id)
+            existing_contents = {m.content.strip() for m in existing_history}
+            synced_count = 0
+
+            for msg in webex_messages:
+                msg_id = getattr(msg, "id", None)
+                if current_msg_id and msg_id == current_msg_id:
+                    continue
+
+                raw_text = (
+                    getattr(msg, "text", None)
+                    or getattr(msg, "markdown", None)
+                    or getattr(msg, "html", None)
+                    or ""
+                )
+                if not raw_text.strip():
+                    continue
+
+                msg_person_id = getattr(msg, "personId", None)
+                msg_person_email = getattr(msg, "personEmail", None)
+
+                is_bot = msg_person_id == bot_person_id or (
+                    bot_email and msg_person_email == bot_email
+                )
+                role = "assistant" if is_bot else "user"
+                cleaned_content = self._clean_prompt(raw_text.strip())
+
+                if not cleaned_content:
+                    continue
+
+                if cleaned_content not in existing_contents:
+                    self.conversation_manager.add_message(
+                        thread_id=thread_id,
+                        role=role,
+                        content=cleaned_content,
+                        room_id=room_id,
+                    )
+                    existing_contents.add(cleaned_content)
+                    synced_count += 1
+                    log.info(
+                        "Synced unmentioned Webex message: [%s] %s",
+                        role,
+                        cleaned_content[:50],
+                    )
+
+            if synced_count > 0:
+                log.info(
+                    "Successfully synced %d unmentioned Webex messages for thread %s",
+                    synced_count,
+                    thread_id,
+                )
+
+        except Exception as e:
+            log.warning(
+                "Failed to sync Webex thread history for thread %s: %s", thread_id, e
+            )
 
     def _build_messages(
         self,
@@ -301,7 +575,11 @@ class AICommand(Command):
                 )
                 messages.append({"role": "system", "content": context_block})
 
-        messages.append({"role": "user", "content": prompt})
+        if messages and messages[-1]["role"] == "user":
+            if prompt not in messages[-1]["content"]:
+                messages[-1]["content"] += f"\n\n{prompt}"
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         return messages
 
@@ -760,7 +1038,7 @@ class AICommand(Command):
     def execute(
         self,
         message: str,
-        attachment_actions: Any,  # noqa: ARG002
+        attachment_actions: Any,
         activity: Any,
     ) -> list[str]:
         """Execute the AI command to respond to user message.
@@ -798,8 +1076,21 @@ class AICommand(Command):
             log.warning("Message was empty after cleaning")
             return ["Please ask me a question! I'm here to help."]
 
-        thread_id = self._get_thread_id(activity)
-        room_id = self._get_room_id(activity)
+        thread_id = self._get_thread_id(activity, attachment_actions)
+        room_id = self._get_room_id(activity, attachment_actions)
+        current_msg_id = (
+            getattr(attachment_actions, "id", None)
+            or getattr(activity, "id", None)
+            or (activity.get("id") if isinstance(activity, dict) else None)
+        )
+
+        if thread_id and room_id:
+            self._sync_webex_thread_history(
+                thread_id,
+                room_id,
+                current_msg_id=current_msg_id,
+                activity=activity,
+            )
 
         log.info("=" * 60)
         log.info("PROCESSING MESSAGE")
