@@ -31,7 +31,9 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apk add --no-cache ca-certificates \
     && addgroup -g 1000 appuser \
-    && adduser -D -u 1000 -G appuser appuser
+    && adduser -D -u 1000 -G appuser appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app/data
 
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 
@@ -40,5 +42,7 @@ WORKDIR /app
 USER appuser
 
 ENV PATH="/app/.venv/bin:$PATH"
+ENV CONVERSATION_DB_PATH="/app/data/conversations.db"
+VOLUME ["/app/data"]
 
 ENTRYPOINT ["webex-bot-ai"]

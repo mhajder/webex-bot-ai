@@ -49,6 +49,18 @@ cd webex-bot-ai
 uv sync
 ```
 
+#### Option 3: Run with Docker (Persistent Storage)
+
+Run in a container with database volume persistence:
+
+```bash
+docker run -d \
+  --name webex-bot-ai \
+  --env-file .env \
+  -v webex_bot_data:/app/data \
+  ghcr.io/mhajder/webex-bot-ai:latest
+```
+
 ### Configuration
 
 1. Configure environment:
