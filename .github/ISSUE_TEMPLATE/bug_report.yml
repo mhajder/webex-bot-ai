@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in webex-bot-ai does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove tokens, API keys, emails and room IDs you don't want public from what you paste below.
+        For security issues, use [private vulnerability reporting](https://github.com/mhajder/webex-bot-ai/security/advisories/new) instead.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the message you sent the bot and what it replied, or the error.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Mention the bot in a space with `...`
+        2. Reply in the thread with `...`
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: webex-bot-ai version
+      placeholder: e.g. 0.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - uvx / pip (PyPI)
+        - Docker image (ghcr.io)
+        - From source
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: LLM model
+      description: The LLM_MODEL value.
+      placeholder: e.g. gpt-4o-mini, gemini/gemini-2.5-flash, ollama_chat/gpt-oss:120b
+    validations:
+      required: true
+  - type: dropdown
+    id: mcp
+    attributes:
+      label: MCP servers enabled?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: Non-secret settings only, such as CONVERSATION_* or MCP_REQUEST_TIMEOUT. Never paste tokens or API keys.
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Redact anything private.
+      render: text
