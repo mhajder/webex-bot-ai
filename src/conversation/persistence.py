@@ -5,13 +5,192 @@ import json
 import logging
 import re
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 import aiosqlite
 
 from src.conversation.types import Message
 
 log = logging.getLogger(__name__)
+
+
+def _now() -> str:
+    """Current UTC time in one consistent text format for TIMESTAMP columns.
+
+    Matches SQLite's ``datetime('now')`` layout (space separator) so string
+    comparisons in cleanup queries work, and avoids the default sqlite3
+    datetime adapter deprecated since Python 3.12.
+    """
+    return datetime.now(UTC).isoformat(sep=" ")
+
+
+# Filler words dropped from search queries; matching them would rank nearly
+# every message as relevant once terms are OR-ed
+_STOPWORDS = frozenset(
+    [
+        "a",
+        "about",
+        "above",
+        "after",
+        "again",
+        "all",
+        "also",
+        "am",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "before",
+        "being",
+        "below",
+        "between",
+        "both",
+        "but",
+        "by",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "doing",
+        "down",
+        "during",
+        "each",
+        "few",
+        "for",
+        "from",
+        "further",
+        "had",
+        "has",
+        "have",
+        "having",
+        "he",
+        "her",
+        "here",
+        "hers",
+        "him",
+        "his",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "just",
+        "me",
+        "more",
+        "most",
+        "my",
+        "no",
+        "nor",
+        "not",
+        "now",
+        "of",
+        "off",
+        "on",
+        "once",
+        "only",
+        "or",
+        "other",
+        "our",
+        "ours",
+        "out",
+        "over",
+        "own",
+        "please",
+        "same",
+        "she",
+        "should",
+        "so",
+        "some",
+        "such",
+        "than",
+        "thank",
+        "thanks",
+        "that",
+        "the",
+        "their",
+        "theirs",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "through",
+        "to",
+        "too",
+        "under",
+        "until",
+        "up",
+        "very",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "whom",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+        "yours",
+    ]
+)
+
+# Upper bound on OR-ed terms, so a pasted log doesn't build a huge query
+_MAX_QUERY_TERMS = 16
+
+
+def _build_fts_query(query: str) -> tuple[str, str]:
+    """Build an FTS5 MATCH expression and a LIKE fallback term from user text.
+
+    Keywords (filler words and single characters dropped) are OR-ed, so a
+    message matches if it shares any keyword with the query; results are
+    ordered by FTS5's bm25 rank, which favors messages matching more and
+    rarer keywords. Each term is quoted as an FTS5 string so punctuation
+    (``.``, ``-``) and operator words (AND/OR/NOT/NEAR) don't raise FTS5
+    syntax errors. The LIKE fallback uses the longest keyword.
+    """
+    terms = list(
+        dict.fromkeys(
+            t
+            for t in (t.strip(".-") for t in re.findall(r"[\w.-]+", query.lower()))
+            if len(t) > 1 and t not in _STOPWORDS
+        )
+    )[:_MAX_QUERY_TERMS]
+    if not terms:
+        return "", ""
+    fts_query = " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
+    return fts_query, max(terms, key=len)
+
+
+def _row_to_message(row: Sequence[Any]) -> Message:
+    """Convert a (role, content, timestamp, metadata, thread_id) search row."""
+    return Message(
+        role=row[0],
+        content=row[1],
+        timestamp=row[2],
+        metadata={
+            **(json.loads(row[3]) if row[3] else {}),
+            "thread_id": row[4],
+        },
+    )
 
 
 class ConversationStore:
@@ -76,6 +255,14 @@ class ConversationStore:
                 with contextlib.suppress(Exception):
                     await db.execute("ALTER TABLE messages ADD COLUMN room_id TEXT")
 
+                # Archived messages (summarized or timed out) stay in the table
+                # and the FTS index for room search, but are not loaded back
+                # into the thread context.
+                with contextlib.suppress(Exception):
+                    await db.execute(
+                        "ALTER TABLE messages ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"
+                    )
+
                 # Create indexes for faster queries
                 await db.execute(
                     """
@@ -120,6 +307,14 @@ class ConversationStore:
                         END;
                         """
                     )
+                    # Backfill rows written before the FTS table/triggers existed
+                    await db.execute(
+                        """
+                        INSERT INTO messages_fts(rowid, content, thread_id, room_id, role)
+                        SELECT id, content, thread_id, room_id, role FROM messages
+                        WHERE id NOT IN (SELECT rowid FROM messages_fts)
+                        """
+                    )
                 except Exception as fts_err:
                     log.warning(
                         "FTS5 table initialization skipped/not supported: %s", fts_err
@@ -144,6 +339,7 @@ class ConversationStore:
             room_id: Optional Webex room identifier.
         """
         try:
+            now = _now()
             async with aiosqlite.connect(self.db_path) as db:
                 # Ensure conversation exists
                 await db.execute(
@@ -154,7 +350,7 @@ class ConversationStore:
                         room_id=COALESCE(excluded.room_id, conversations.room_id),
                         updated_at=excluded.updated_at
                     """,
-                    (thread_id, room_id, datetime.now(UTC), datetime.now(UTC)),
+                    (thread_id, room_id, now, now),
                 )
 
                 # Save message
@@ -188,7 +384,7 @@ class ConversationStore:
     async def load_thread(
         self, thread_id: str, limit: int | None = None
     ) -> list[Message]:
-        """Load all messages for a thread from the database.
+        """Load the non-archived messages for a thread from the database.
 
         Args:
             thread_id: The thread identifier.
@@ -204,7 +400,7 @@ class ConversationStore:
                         SELECT role, content, timestamp, metadata FROM (
                             SELECT role, content, timestamp, metadata
                             FROM messages
-                            WHERE thread_id = ?
+                            WHERE thread_id = ? AND archived = 0
                             ORDER BY timestamp DESC
                             LIMIT ?
                         ) ORDER BY timestamp ASC
@@ -214,7 +410,7 @@ class ConversationStore:
                     query = """
                         SELECT role, content, timestamp, metadata
                         FROM messages
-                        WHERE thread_id = ?
+                        WHERE thread_id = ? AND archived = 0
                         ORDER BY timestamp ASC
                     """
                     params = (thread_id,)
@@ -328,8 +524,15 @@ class ConversationStore:
                     """,
                     (days,),
                 )
-                await db.commit()
                 deleted = cursor.rowcount
+                # PRAGMA foreign_keys is off, so ON DELETE CASCADE never fires
+                await db.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE thread_id NOT IN (SELECT thread_id FROM conversations)
+                    """
+                )
+                await db.commit()
                 if deleted > 0:
                     log.info("Cleaned up %d old conversation threads", deleted)
                 return deleted
@@ -353,8 +556,9 @@ class ConversationStore:
         if not room_id or not query or not query.strip():
             return []
 
-        clean_terms = re.findall(r"[\w.-]+", query)
-        clean_query = " ".join(clean_terms) if clean_terms else query.strip()
+        fts_query, like_term = _build_fts_query(query)
+        if not fts_query:
+            return []
 
         try:
             async with aiosqlite.connect(self.db_path) as db:
@@ -369,22 +573,11 @@ class ConversationStore:
                         ORDER BY rank
                         LIMIT ?
                         """,
-                        (room_id, clean_query, limit),
+                        (room_id, fts_query, limit),
                     )
                     rows = list(await cursor.fetchall())
                     if rows:
-                        return [
-                            Message(
-                                role=r[0],
-                                content=r[1],
-                                timestamp=r[2],
-                                metadata={
-                                    **(json.loads(r[3]) if r[3] else {}),
-                                    "thread_id": r[4],
-                                },
-                            )
-                            for r in rows
-                        ]
+                        return [_row_to_message(r) for r in rows]
                 except Exception as fts_e:
                     log.debug("FTS5 match failed, falling back to LIKE: %s", fts_e)
 
@@ -397,23 +590,13 @@ class ConversationStore:
                     ORDER BY timestamp DESC
                     LIMIT ?
                     """,
-                    (room_id, f"%{clean_query}%", limit),
+                    (room_id, f"%{like_term}%", limit),
                 )
                 rows = await cursor.fetchall()
-                return [
-                    Message(
-                        role=r[0],
-                        content=r[1],
-                        timestamp=r[2],
-                        metadata={
-                            **(json.loads(r[3]) if r[3] else {}),
-                            "thread_id": r[4],
-                        },
-                    )
-                    for r in rows
-                ]
+                return [_row_to_message(r) for r in rows]
         except Exception as e:
-            log.warning("Failed room search for '%s' in room %s: %s", query, room_id, e)
+            # The query is user text; keep it out of WARNING logs (sent to Sentry)
+            log.warning("Failed room search in room %s: %s", room_id, e)
             return []
 
     def save_message_sync(
@@ -421,44 +604,50 @@ class ConversationStore:
     ) -> None:
         """Synchronously save a message to database (fallback when async is unavailable)."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            now_iso = datetime.now(UTC).isoformat()
-            cursor.execute(
-                """
-                INSERT INTO conversations (thread_id, room_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(thread_id) DO UPDATE SET
-                    room_id=COALESCE(excluded.room_id, conversations.room_id),
-                    updated_at=excluded.updated_at
-                """,
-                (thread_id, room_id, now_iso, now_iso),
-            )
-            metadata_json = json.dumps(message.metadata)
-            cursor.execute(
-                """
-                INSERT INTO messages (thread_id, room_id, role, content, timestamp, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                cursor = conn.cursor()
+                now_iso = _now()
+                cursor.execute(
+                    """
+                    INSERT INTO conversations (thread_id, room_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        room_id=COALESCE(excluded.room_id, conversations.room_id),
+                        updated_at=excluded.updated_at
+                    """,
+                    (thread_id, room_id, now_iso, now_iso),
+                )
+                metadata_json = json.dumps(message.metadata)
+                cursor.execute(
+                    """
+                    INSERT INTO messages (thread_id, room_id, role, content, timestamp, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        thread_id,
+                        room_id,
+                        message.role,
+                        message.content,
+                        message.timestamp,
+                        metadata_json,
+                    ),
+                )
+                conn.commit()
+                log.debug(
+                    "Sync-saved %s message to thread %s (room %s)",
+                    message.role,
                     thread_id,
                     room_id,
-                    message.role,
-                    message.content,
-                    message.timestamp,
-                    metadata_json,
-                ),
-            )
-            conn.commit()
-            conn.close()
-            log.debug(
-                "Sync-saved %s message to thread %s (room %s)",
-                message.role,
-                thread_id,
-                room_id,
-            )
+                )
         except sqlite3.OperationalError as e:
-            log.debug("Database not ready for sync save: %s", e)
+            # Only a missing schema means "not initialized yet"; anything else
+            # (e.g. "database is locked") loses the message and must be visible.
+            if "no such table" in str(e):
+                log.debug("Database not ready for sync save: %s", e)
+            else:
+                log.warning(
+                    "Failed to sync-save message for thread %s: %s", thread_id, e
+                )
         except Exception as e:
             log.exception("Failed to sync-save message for thread %s: %s", thread_id, e)
 
@@ -469,70 +658,45 @@ class ConversationStore:
         if not room_id or not query or not query.strip():
             return []
 
-        clean_terms = re.findall(r"[\w.-]+", query)
-        clean_query = " ".join(clean_terms) if clean_terms else query.strip()
+        fts_query, like_term = _build_fts_query(query)
+        if not fts_query:
+            return []
 
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                cursor = conn.cursor()
 
-            # Try FTS5 search first
-            try:
+                # Try FTS5 search first
+                try:
+                    cursor.execute(
+                        """
+                        SELECT m.role, m.content, m.timestamp, m.metadata, m.thread_id
+                        FROM messages_fts f
+                        JOIN messages m ON f.rowid = m.id
+                        WHERE f.room_id = ? AND messages_fts MATCH ?
+                        ORDER BY rank
+                        LIMIT ?
+                        """,
+                        (room_id, fts_query, limit),
+                    )
+                    rows = cursor.fetchall()
+                    if rows:
+                        return [_row_to_message(r) for r in rows]
+                except sqlite3.OperationalError as fts_e:
+                    log.debug("FTS search fallback to LIKE: %s", fts_e)
+
+                # Fallback to LIKE search
                 cursor.execute(
                     """
-                    SELECT m.role, m.content, m.timestamp, m.metadata, m.thread_id
-                    FROM messages_fts f
-                    JOIN messages m ON f.rowid = m.id
-                    WHERE f.room_id = ? AND messages_fts MATCH ?
-                    ORDER BY rank
+                    SELECT role, content, timestamp, metadata, thread_id
+                    FROM messages
+                    WHERE room_id = ? AND content LIKE ?
+                    ORDER BY timestamp DESC
                     LIMIT ?
                     """,
-                    (room_id, clean_query, limit),
+                    (room_id, f"%{like_term}%", limit),
                 )
-                rows = cursor.fetchall()
-                if rows:
-                    conn.close()
-                    return [
-                        Message(
-                            role=r[0],
-                            content=r[1],
-                            timestamp=r[2],
-                            metadata={
-                                **(json.loads(r[3]) if r[3] else {}),
-                                "thread_id": r[4],
-                            },
-                        )
-                        for r in rows
-                    ]
-            except sqlite3.OperationalError as fts_e:
-                log.debug("FTS search fallback to LIKE: %s", fts_e)
-
-            # Fallback to LIKE search
-            cursor.execute(
-                """
-                SELECT role, content, timestamp, metadata, thread_id
-                FROM messages
-                WHERE room_id = ? AND content LIKE ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (room_id, f"%{clean_query}%", limit),
-            )
-            rows = cursor.fetchall()
-            conn.close()
-
-            return [
-                Message(
-                    role=r[0],
-                    content=r[1],
-                    timestamp=r[2],
-                    metadata={
-                        **(json.loads(r[3]) if r[3] else {}),
-                        "thread_id": r[4],
-                    },
-                )
-                for r in rows
-            ]
+                return [_row_to_message(r) for r in cursor.fetchall()]
         except Exception as e:
             log.warning("Sync room search failed: %s", e)
             return []
@@ -543,57 +707,55 @@ class ConversationStore:
         """Synchronously load thread messages from database."""
         messages = []
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            if limit:
-                query = """
-                    SELECT role, content, timestamp, metadata FROM (
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                cursor = conn.cursor()
+                if limit:
+                    query = """
+                        SELECT role, content, timestamp, metadata FROM (
+                            SELECT role, content, timestamp, metadata
+                            FROM messages
+                            WHERE thread_id = ? AND archived = 0
+                            ORDER BY timestamp DESC
+                            LIMIT ?
+                        ) ORDER BY timestamp ASC
+                    """
+                    params: tuple = (thread_id, limit)
+                else:
+                    query = """
                         SELECT role, content, timestamp, metadata
                         FROM messages
-                        WHERE thread_id = ?
-                        ORDER BY timestamp DESC
-                        LIMIT ?
-                    ) ORDER BY timestamp ASC
-                """
-                params: tuple = (thread_id, limit)
-            else:
-                query = """
-                    SELECT role, content, timestamp, metadata
-                    FROM messages
-                    WHERE thread_id = ?
-                    ORDER BY timestamp ASC
-                """
-                params = (thread_id,)
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            conn.close()
+                        WHERE thread_id = ? AND archived = 0
+                        ORDER BY timestamp ASC
+                    """
+                    params = (thread_id,)
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
 
-            for role, content, timestamp, metadata_json in rows:
-                metadata = json.loads(metadata_json) if metadata_json else {}
-                messages.append(
-                    Message(
-                        role=role,
-                        content=content,
-                        timestamp=timestamp,
-                        metadata=metadata,
+                for role, content, timestamp, metadata_json in rows:
+                    metadata = json.loads(metadata_json) if metadata_json else {}
+                    messages.append(
+                        Message(
+                            role=role,
+                            content=content,
+                            timestamp=timestamp,
+                            metadata=metadata,
+                        )
                     )
-                )
-            return messages
+                return messages
         except sqlite3.OperationalError:
             return []
 
     def delete_thread_sync(self, thread_id: str) -> None:
         """Synchronously delete thread from database."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM messages WHERE thread_id = ?", (thread_id,))
-            cursor.execute(
-                "DELETE FROM conversations WHERE thread_id = ?", (thread_id,)
-            )
-            conn.commit()
-            conn.close()
-            log.debug("Deleted thread %s from database", thread_id)
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM messages WHERE thread_id = ?", (thread_id,))
+                cursor.execute(
+                    "DELETE FROM conversations WHERE thread_id = ?", (thread_id,)
+                )
+                conn.commit()
+                log.debug("Deleted thread %s from database", thread_id)
         except sqlite3.OperationalError:
             pass
 
@@ -609,7 +771,7 @@ class ConversationStore:
                         thread_summary = excluded.thread_summary,
                         updated_at = excluded.updated_at
                     """,
-                    (thread_id, summary, datetime.now(UTC)),
+                    (thread_id, summary, _now()),
                 )
                 await db.commit()
                 log.debug("Saved thread summary for thread %s", thread_id)
@@ -619,22 +781,21 @@ class ConversationStore:
     def save_thread_summary_sync(self, thread_id: str, summary: str) -> None:
         """Synchronously save or update the thread summary in database."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            now_iso = datetime.now(UTC).isoformat()
-            cursor.execute(
-                """
-                INSERT INTO conversations (thread_id, thread_summary, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(thread_id) DO UPDATE SET
-                    thread_summary = excluded.thread_summary,
-                    updated_at = excluded.updated_at
-                """,
-                (thread_id, summary, now_iso),
-            )
-            conn.commit()
-            conn.close()
-            log.debug("Sync-saved thread summary for thread %s", thread_id)
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                cursor = conn.cursor()
+                now_iso = _now()
+                cursor.execute(
+                    """
+                    INSERT INTO conversations (thread_id, thread_summary, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        thread_summary = excluded.thread_summary,
+                        updated_at = excluded.updated_at
+                    """,
+                    (thread_id, summary, now_iso),
+                )
+                conn.commit()
+                log.debug("Sync-saved thread summary for thread %s", thread_id)
         except Exception as e:
             log.exception("Failed to sync-save summary for thread %s: %s", thread_id, e)
 
@@ -655,75 +816,83 @@ class ConversationStore:
     def get_thread_summary_sync(self, thread_id: str) -> str | None:
         """Synchronously get the thread summary from database."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT thread_summary FROM conversations WHERE thread_id = ?",
-                (thread_id,),
-            )
-            row = cursor.fetchone()
-            conn.close()
-            return row[0] if row and row[0] else None
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT thread_summary FROM conversations WHERE thread_id = ?",
+                    (thread_id,),
+                )
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
         except Exception as e:
             log.exception("Failed to sync-get summary for thread %s: %s", thread_id, e)
             return None
 
-    async def trim_old_messages(self, thread_id: str, keep_count: int) -> int:
-        """Trim messages for thread_id to keep only the most recent keep_count.
+    async def archive_messages_until(self, thread_id: str, until: float) -> int:
+        """Archive a thread's messages with timestamp <= ``until`` (after summarization).
+
+        Archived messages are no longer loaded into the thread context but
+        remain searchable through room history search.
 
         Returns:
-            Number of messages deleted.
+            Number of messages archived.
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute(
                     """
-                    DELETE FROM messages
-                    WHERE thread_id = ? AND id NOT IN (
-                        SELECT id FROM (
-                            SELECT id FROM messages
-                            WHERE thread_id = ?
-                            ORDER BY timestamp DESC, id DESC
-                            LIMIT ?
-                        )
-                    )
+                    UPDATE messages SET archived = 1
+                    WHERE thread_id = ? AND archived = 0 AND timestamp <= ?
                     """,
-                    (thread_id, thread_id, keep_count),
+                    (thread_id, until),
                 )
                 await db.commit()
-                deleted = cursor.rowcount
-                log.debug("Trimmed %d old messages for thread %s", deleted, thread_id)
-                return deleted
+                archived = cursor.rowcount
+                log.debug("Archived %d old messages for thread %s", archived, thread_id)
+                return archived
         except Exception as e:
-            log.exception("Failed to trim messages for thread %s: %s", thread_id, e)
+            log.exception("Failed to archive messages for thread %s: %s", thread_id, e)
             return 0
 
-    def trim_old_messages_sync(self, thread_id: str, keep_count: int) -> int:
-        """Synchronously trim messages for thread_id to keep only the most recent keep_count."""
+    def archive_thread_sync(
+        self, thread_id: str, inactive_since: float | None = None
+    ) -> bool:
+        """Archive all messages of a thread and drop its summary.
+
+        Used when a conversation times out, so stale context is not reloaded
+        from the database while the messages stay searchable.
+
+        Args:
+            thread_id: The thread identifier.
+            inactive_since: If given, only archive when the thread's newest
+                message is older than this epoch timestamp.
+
+        Returns:
+            True if any message or summary was archived (False when the
+            thread was already archived, so callers don't log it repeatedly).
+        """
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                DELETE FROM messages
-                WHERE thread_id = ? AND id NOT IN (
-                    SELECT id FROM (
-                        SELECT id FROM messages
-                        WHERE thread_id = ?
-                        ORDER BY timestamp DESC, id DESC
-                        LIMIT ?
-                    )
-                )
-                """,
-                (thread_id, thread_id, keep_count),
-            )
-            conn.commit()
-            deleted = cursor.rowcount
-            conn.close()
-            log.debug("Sync-trimmed %d old messages for thread %s", deleted, thread_id)
-            return deleted
-        except Exception as e:
-            log.exception(
-                "Failed to sync-trim messages for thread %s: %s", thread_id, e
-            )
-            return 0
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                if inactive_since is not None:
+                    row = conn.execute(
+                        "SELECT MAX(timestamp) FROM messages WHERE thread_id = ?",
+                        (thread_id,),
+                    ).fetchone()
+                    if not row or row[0] is None or row[0] >= inactive_since:
+                        return False
+                changed = conn.execute(
+                    "UPDATE messages SET archived = 1 WHERE thread_id = ? AND archived = 0",
+                    (thread_id,),
+                ).rowcount
+                changed += conn.execute(
+                    """
+                    UPDATE conversations SET thread_summary = NULL
+                    WHERE thread_id = ? AND thread_summary IS NOT NULL
+                    """,
+                    (thread_id,),
+                ).rowcount
+                conn.commit()
+                return changed > 0
+        except sqlite3.OperationalError as e:
+            log.debug("Database not ready to archive thread %s: %s", thread_id, e)
+            return False
