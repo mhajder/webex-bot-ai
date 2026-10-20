@@ -6,10 +6,15 @@ Supports multiple LLM providers via LiteLLM and multiple MCP servers.
 
 import json
 import os
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# Load .env before the module-level ``settings`` instance below is built;
+# loading it later (e.g. in main) leaves every setting at its default.
+load_dotenv()
 
 
 class BotSettings(BaseSettings):
@@ -88,8 +93,8 @@ class LLMSettings(BaseSettings):
     )
     api_key: str | None = Field(
         default=None,
-        description="API key (if not using provider-specific env var)",
-        validation_alias="OPENAI_API_KEY",
+        description="API key passed to LiteLLM (LLM_API_KEY); "
+        "provider-specific env vars are used when unset",
     )
 
     # System prompt template
@@ -154,7 +159,7 @@ RESPONSE PROTOCOL:
         return self.system_prompt.format(bot_name=bot_name)
 
 
-class MCPServerConfig(BaseSettings):
+class MCPServerConfig(BaseModel):
     """Configuration for a single MCP server."""
 
     name: str = Field(description="Unique identifier for this MCP server")
@@ -168,10 +173,18 @@ class MCPServerConfig(BaseSettings):
     )
 
 
+# Problems found while parsing MCP_SERVERS, reported by Settings.config_warnings()
+_MCP_CONFIG_ERRORS: list[str] = []
+
+
 class MCPSettings(BaseSettings):
     """MCP (Model Context Protocol) settings for tool integration."""
 
-    model_config = SettingsConfigDict(env_prefix="MCP_", extra="ignore")
+    # env_ignore_empty: an empty MCP_SERVERS (e.g. from compose substitution)
+    # means "no servers" rather than a JSON parse error at import time.
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_", extra="ignore", env_ignore_empty=True
+    )
 
     enabled: bool = Field(default=False, description="Enable MCP integration")
     request_timeout: int = Field(
@@ -180,20 +193,48 @@ class MCPSettings(BaseSettings):
 
     # Servers configuration (JSON string in env var)
     # Format: [{"name": "server1", "url": "http://...", "enabled": true}, ...]
-    servers: list[MCPServerConfig] = Field(
+    # pydantic-settings parses the MCP_SERVERS JSON into this field directly.
+    servers: Annotated[list[MCPServerConfig], NoDecode] = Field(
         default_factory=list, description="List of MCP server configurations"
     )
 
-    def model_post_init(self, __context: Any) -> None:
-        """Parse MCP servers from environment variable."""
-        if not self.servers:
-            servers_json = os.getenv("MCP_SERVERS", "")
-            if servers_json:
-                try:
-                    servers_data = json.loads(servers_json)
-                    self.servers = [MCPServerConfig(**s) for s in servers_data]
-                except json.JSONDecodeError:
-                    pass
+    @field_validator("servers", mode="before")
+    @classmethod
+    def _parse_servers(cls, value: Any) -> Any:
+        """Parse MCP_SERVERS leniently.
+
+        Invalid JSON or invalid entries are reported as configuration warnings
+        and skipped, instead of raising at import time (before logging is set
+        up) and stopping the bot even when MCP is disabled.
+        """
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as e:
+                _MCP_CONFIG_ERRORS.append(
+                    f"MCP_SERVERS is not valid JSON ({e}); no MCP servers configured"
+                )
+                return []
+        if not isinstance(value, list):
+            _MCP_CONFIG_ERRORS.append(
+                "MCP_SERVERS must be a JSON list; no MCP servers configured"
+            )
+            return []
+
+        servers = []
+        for index, item in enumerate(value):
+            try:
+                servers.append(MCPServerConfig.model_validate(item))
+            except ValidationError as e:
+                # Field locations and messages only: input values may hold tokens
+                problems = "; ".join(
+                    f"{'.'.join(map(str, err['loc'])) or 'entry'}: {err['msg']}"
+                    for err in e.errors()
+                )
+                _MCP_CONFIG_ERRORS.append(
+                    f"MCP_SERVERS entry {index} skipped ({problems})"
+                )
+        return servers
 
     @property
     def enabled_servers(self) -> list[MCPServerConfig]:
@@ -211,6 +252,11 @@ class ConversationSettings(BaseSettings):
     )
     timeout_hours: int = Field(
         default=24, ge=1, description="Hours before conversation is considered stale"
+    )
+    retention_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days to keep inactive threads in the database (0 = forever)",
     )
     db_path: str = Field(
         default="conversations.db", description="Path to SQLite database file"
@@ -235,11 +281,40 @@ class ConversationSettings(BaseSettings):
         default=None,
         description="Optional distinct LLM model identifier for thread summarization",
     )
+    summary_api_key: str | None = Field(
+        default=None,
+        description=(
+            "API key for the summary model; defaults to LLM_API_KEY when the "
+            "summary model uses the same provider as LLM_MODEL"
+        ),
+    )
+    summary_api_base: str | None = Field(
+        default=None,
+        description=(
+            "API base URL for the summary model; defaults to LLM_API_BASE when "
+            "the summary model uses the same provider as LLM_MODEL"
+        ),
+    )
 
     @property
     def timeout_seconds(self) -> int:
         """Get timeout in seconds."""
         return self.timeout_hours * 3600
+
+
+# Model prefix -> environment variable holding that provider's API key
+_PROVIDER_KEY_VARS = {
+    "openai": "OPENAI_API_KEY",
+    "gpt": "OPENAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "azure": "AZURE_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "groq": "GROQ_API_KEY",
+}
 
 
 class Settings(BaseSettings):
@@ -264,39 +339,17 @@ class Settings(BaseSettings):
         if model.startswith("ollama"):
             return errors
 
-        # Check for provider-specific API keys
-        provider_keys = {
-            "openai": "OPENAI_API_KEY",
-            "gpt": "OPENAI_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "claude": "ANTHROPIC_API_KEY",
-            "gemini": "GEMINI_API_KEY",
-            "google": "GEMINI_API_KEY",
-            "azure": "AZURE_API_KEY",
-            "cohere": "COHERE_API_KEY",
-            "groq": "GROQ_API_KEY",
-        }
-
-        # Check which provider the model uses
-        api_key_found = False
-
         # Check generic keys first
-        if self.llm.api_key or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY"):
+        if self.llm.api_key or os.getenv("OPENAI_API_KEY"):
             api_key_found = True
         else:
-            # Check provider-specific keys
-            for provider_prefix, env_key in provider_keys.items():
-                if model.startswith(provider_prefix) and os.getenv(env_key):
-                    api_key_found = True
-                    break
-
-            # If no provider prefix matched, check all provider-specific keys
-            if not api_key_found:
-                for env_key in provider_keys.values():
-                    if os.getenv(env_key):
-                        api_key_found = True
-                        break
+            # Check the key for the provider the model prefix names
+            matched_keys = self._provider_key_vars(model)
+            if matched_keys:
+                api_key_found = any(os.getenv(k) for k in matched_keys)
+            else:
+                # No provider prefix matched, accept any provider-specific key
+                api_key_found = any(os.getenv(k) for k in _PROVIDER_KEY_VARS.values())
 
         if not api_key_found:
             errors.append(
@@ -306,6 +359,37 @@ class Settings(BaseSettings):
             )
 
         return errors
+
+    @staticmethod
+    def _provider_key_vars(model: str) -> list[str]:
+        """Key environment variables for the provider named by the model prefix."""
+        return [
+            env_key
+            for prefix, env_key in _PROVIDER_KEY_VARS.items()
+            if model.startswith(prefix)
+        ]
+
+    def config_warnings(self) -> list[str]:
+        """Return likely misconfigurations that don't block startup."""
+        warnings = list(dict.fromkeys(_MCP_CONFIG_ERRORS))
+        model = self.llm.model.lower()
+        matched_keys = self._provider_key_vars(model)
+        # OPENAI_API_KEY passes validation for any model (it may be meant for
+        # an OpenAI-compatible proxy), but litellm won't use it for another
+        # provider's model, so requests would fail with an auth error.
+        if (
+            not self.llm.api_key
+            and os.getenv("OPENAI_API_KEY")
+            and matched_keys
+            and "OPENAI_API_KEY" not in matched_keys
+            and not any(os.getenv(k) for k in matched_keys)
+        ):
+            warnings.append(
+                f"LLM_MODEL '{self.llm.model}' needs {' or '.join(sorted(set(matched_keys)))}, "
+                "but only OPENAI_API_KEY is set; LLM requests will likely fail "
+                "to authenticate. Set the provider's key or LLM_API_KEY."
+            )
+        return warnings
 
 
 # Global settings instance
