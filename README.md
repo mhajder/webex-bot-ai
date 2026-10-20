@@ -117,6 +117,7 @@ webex-bot-ai
 | `LLM_TEMPERATURE` | Sampling temperature (0.0-2.0) | `0.7` |
 | `LLM_MAX_TOKENS` | Maximum response tokens | `2048` |
 | `LLM_API_BASE` | Custom API endpoint | - |
+| `LLM_API_KEY` | API key passed to LiteLLM; when unset, the provider's own variable (e.g. `OPENAI_API_KEY`) is used | - |
 
 ### Conversation Settings & Rolling Summarization
 
@@ -127,8 +128,11 @@ webex-bot-ai
 | `CONVERSATION_SUMMARY_THRESHOLD` | Message count threshold to trigger rolling summarization | `50` |
 | `CONVERSATION_KEEP_RECENT_MESSAGES` | Number of recent messages retained verbatim after summary | `20` |
 | `CONVERSATION_SUMMARY_MODEL` | Optional distinct LLM model for thread summarization | Same as `LLM_MODEL` |
+| `CONVERSATION_SUMMARY_API_KEY` | API key for the summary model | `LLM_API_KEY` if same provider as `LLM_MODEL`, else the provider's own env var |
+| `CONVERSATION_SUMMARY_API_BASE` | API base URL for the summary model | `LLM_API_BASE` if same provider as `LLM_MODEL` |
 | `CONVERSATION_MAX_HISTORY_MESSAGES` | Maximum in-memory history messages | `50` |
 | `CONVERSATION_TIMEOUT_HOURS` | Hours before a thread is considered stale | `24` |
+| `CONVERSATION_RETENTION_DAYS` | Days to keep inactive threads in the database (`0` = forever); cleanup runs at startup and daily | `30` |
 | `CONVERSATION_DB_PATH` | SQLite database file path | `conversations.db` |
 
 ### Model Examples
@@ -180,10 +184,10 @@ MCP_REQUEST_TIMEOUT=30
 MCP_SERVERS=[{"name": "my-server", "url": "http://localhost:8000/mcp", "enabled": true}]
 
 # Multiple servers with auth
-MCP_SERVERS=[
+MCP_SERVERS='[
   {"name": "tools-server", "url": "http://localhost:8000/mcp", "enabled": true},
   {"name": "secure-server", "url": "https://api.example.com/mcp", "auth_token": "your-token", "enabled": true}
-]
+]'
 ```
 
 ### Sentry Error Tracking (Optional)
@@ -200,11 +204,11 @@ Configure Sentry via environment variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SENTRY_DSN` | Sentry DSN (enables Sentry when set) | - |
-| `SENTRY_TRACES_SAMPLE_RATE` | Trace sampling rate (0.0-1.0) | `1.0` |
-| `SENTRY_SEND_DEFAULT_PII` | Include PII in events | `true` |
+| `SENTRY_TRACES_SAMPLE_RATE` | Trace sampling rate (0.0-1.0) | `0.1` |
+| `SENTRY_SEND_DEFAULT_PII` | Include PII in events: user emails/names, LLM prompts and responses, INFO log breadcrumbs | `false` |
 | `SENTRY_ENVIRONMENT` | Environment name (e.g., `production`) | - |
 | `SENTRY_RELEASE` | Release/version identifier | Package version |
-| `SENTRY_PROFILE_SESSION_SAMPLE_RATE` | Profile session sampling rate | `1.0` |
+| `SENTRY_PROFILE_SESSION_SAMPLE_RATE` | Profile session sampling rate | `0.1` |
 | `SENTRY_PROFILE_LIFECYCLE` | Profile lifecycle mode | `trace` |
 | `SENTRY_ENABLE_LOGS` | Enable logging integration | `true` |
 
