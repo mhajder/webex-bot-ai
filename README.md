@@ -1,4 +1,20 @@
+<div align="center">
+
 # Webex Bot - AI Assistant
+
+**Bring any LLM and your MCP tools into Webex spaces, with thread-aware conversations**
+
+[![PyPI](https://img.shields.io/pypi/v/webex-bot-ai?logo=pypi&logoColor=white)](https://pypi.org/project/webex-bot-ai/)
+[![Python](https://img.shields.io/pypi/pyversions/webex-bot-ai?logo=python&logoColor=white)](https://pypi.org/project/webex-bot-ai/)
+[![License](https://img.shields.io/github/license/mhajder/webex-bot-ai)](https://github.com/mhajder/webex-bot-ai/blob/main/LICENSE)
+
+[![Pre-commit Checks](https://github.com/mhajder/webex-bot-ai/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/mhajder/webex-bot-ai/actions/workflows/pre-commit.yml)
+[![Docker](https://img.shields.io/badge/ghcr.io-webex--bot--ai-2496ED?logo=docker&logoColor=white)](https://github.com/mhajder/webex-bot-ai/pkgs/container/webex-bot-ai)
+[![published](https://static.production.devnetcloud.com/codeexchange/assets/images/devnet-published.svg)](https://developer.cisco.com/codeexchange/github/repo/mhajder/webex-bot-ai)
+
+[Quick start](https://github.com/mhajder/webex-bot-ai#-quick-start) · [Configuration](https://github.com/mhajder/webex-bot-ai#-configuration) · [MCP integration](https://github.com/mhajder/webex-bot-ai#mcp-integration) · [Usage](https://github.com/mhajder/webex-bot-ai#-usage)
+
+</div>
 
 A conversational AI bot for Webex that:
 
@@ -7,7 +23,7 @@ A conversational AI bot for Webex that:
 - 🔧 Integrates with MCP (Model Context Protocol) servers for extended capabilities
 - 🌐 Supports multiple LLM providers via LiteLLM (OpenAI, Google Gemini, Ollama, OpenRouter, Anthropic, etc.)
 
-## Features
+## ✨ Features
 
 - **Thread-aware conversations**: The bot remembers context within Webex threads, allowing natural follow-up questions
 - **Rolling thread summarization**: Background tasks summarize older messages as threads grow, preserving context indefinitely without hitting context limits
@@ -18,11 +34,11 @@ A conversational AI bot for Webex that:
 - **Access control**: Restrict bot to approved users, domains, or rooms
 - **Clean code**: Follows Python best practices with ruff linting and formatting
 
-## Quick Start
+## 🚀 Quick Start
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.11 to 3.14
 - [UV](https://docs.astral.sh/uv/) package manager
 - Webex bot token ([create one here](https://developer.webex.com/my-apps))
 - API key for your LLM provider (e.g., OpenAI, Gemini)
@@ -83,7 +99,7 @@ OPENAI_API_KEY=your_openai_api_key
 webex-bot-ai
 ```
 
-## Configuration
+## 🔧 Configuration
 
 ### Bot Settings
 
@@ -200,7 +216,7 @@ SENTRY_DSN=https://your-key@o12345.ingest.us.sentry.io/6789
 SENTRY_ENVIRONMENT=production
 ```
 
-## Usage
+## 💡 Usage
 
 1. **Start a conversation**: Mention the bot in a Webex space:
    ```
@@ -214,19 +230,16 @@ SENTRY_ENVIRONMENT=production
 
 3. **The bot maintains context** within the thread, so you can have natural conversations.
 
-## Development
-
-### Code Quality
+## 🔨 Development
 
 ```bash
-# Lint code
-uv run ruff check src/
+uv sync --group dev
+uv run prek install
 
-# Format code
-uv run ruff format src/
-
-# Fix linting issues
-uv run ruff check src/ --fix
+# Lint, format and type-check
+uv run ruff check .
+uv run ruff format .
+uv run ty check .
 ```
 
 ### Adding New Features
@@ -235,7 +248,7 @@ uv run ruff check src/ --fix
 - **MCP Tools**: Connect to MCP servers via configuration
 - **LLM Providers**: Configure via `LLM_MODEL` using [LiteLLM syntax](https://docs.litellm.ai/docs/providers)
 
-## Dependencies
+## 📦 Dependencies
 
 - [webex_bot](https://github.com/fbradyirl/webex_bot) - Webex bot framework
 - [litellm](https://github.com/BerriAI/litellm) - Universal LLM API
@@ -243,6 +256,12 @@ uv run ruff check src/ --fix
 - [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) - Configuration management
 - [sentry-sdk](https://github.com/getsentry/sentry-python) - Error tracking (optional)
 
-## License
+## 🤝 Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](https://github.com/mhajder/webex-bot-ai/blob/main/CONTRIBUTING.md) for the dev setup, checks and commit message format, and use the [issue templates](https://github.com/mhajder/webex-bot-ai/issues/new/choose) for bugs and feature requests.
+
+Found a security problem? Please report it privately as described in [SECURITY.md](https://github.com/mhajder/webex-bot-ai/blob/main/SECURITY.md).
+
+## 📜 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
