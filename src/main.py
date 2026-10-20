@@ -12,7 +12,6 @@ import asyncio
 import logging
 import sys
 
-from dotenv import load_dotenv
 from webex_bot.webex_bot import WebexBot
 
 from src.commands import AICommand
@@ -20,8 +19,6 @@ from src.config import settings
 from src.conversation import ConversationManager
 from src.mcp_client import MCPMultiClient
 from src.sentry import capture_exception, init_sentry
-
-load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +36,8 @@ log = logging.getLogger(__name__)
 
 def validate_configuration() -> bool:
     """Validate that all required configuration is present."""
+    for warning in settings.config_warnings():
+        log.warning("Configuration warning: %s", warning)
     errors = settings.validate_config()
     if errors:
         for error in errors:
@@ -137,27 +136,24 @@ def setup_commands(
     Returns:
         The ConversationManager instance used by the bot.
     """
-    conversation_manager = ConversationManager(
-        max_messages=settings.conversation.max_history_messages,
-        timeout_seconds=settings.conversation.timeout_seconds,
-        db_path=settings.conversation.db_path,
-        enable_persistence=settings.conversation.enable_persistence,
-        enable_summarization=settings.conversation.enable_summarization,
-        summary_threshold=settings.conversation.summary_threshold,
-        keep_recent_messages=settings.conversation.keep_recent_messages,
-        summary_model=settings.conversation.summary_model,
-    )
+    conversation_manager = ConversationManager.from_settings()
 
     bot_name = settings.bot.name
 
-    if (
-        bot_name.lower() == "assistant"
-        and hasattr(bot, "teams_bot_email")
-        and isinstance(bot.teams_bot_email, str)
-    ):
-        email_part = bot.teams_bot_email.split("@")[0].split("-")[0]
-        bot_name = email_part.title()
-        log.info("Extracted bot name from email: %s", bot_name)
+    # Without an explicit BOT_NAME, use the Webex display name: that's what a
+    # mention inserts. A name guessed from the email (e.g. "Ai" from
+    # ai-helper@...) would be stripped from the start of ordinary questions
+    # such as "AI regulations in the EU?". WebexBot.__init__ resets
+    # bot.bot_display_name to "" after fetching it, so ask Webex directly.
+    display_name = None
+    if bot_name.lower() == "assistant":
+        try:
+            display_name = getattr(bot.teams.people.me(), "displayName", None)
+        except Exception as e:
+            log.warning("Could not fetch the bot display name from Webex: %s", e)
+    if isinstance(display_name, str) and display_name.strip():
+        bot_name = display_name.strip()
+        log.info("Using bot display name from Webex: %s", bot_name)
 
     ai_command = AICommand(
         conversation_manager=conversation_manager,
@@ -217,6 +213,10 @@ def main() -> None:
             log.info("Conversation database initialized and ready")
         except Exception as e:
             log.warning("Could not initialize conversation database: %s", e)
+
+        conversation_manager.start_cleanup(
+            retention_days=settings.conversation.retention_days
+        )
 
         log.info("Bot is starting... Press Ctrl+C to stop.")
 
