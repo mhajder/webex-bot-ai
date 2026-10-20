@@ -42,11 +42,13 @@ def init_sentry() -> bool:
 
     Environment Variables:
         SENTRY_DSN: Required. The Sentry DSN for your project.
-        SENTRY_TRACES_SAMPLE_RATE: Sample rate for tracing (0.0 to 1.0). Default: 1.0
-        SENTRY_SEND_DEFAULT_PII: Whether to send PII. Default: true
+        SENTRY_TRACES_SAMPLE_RATE: Sample rate for tracing (0.0 to 1.0). Default: 0.1
+        SENTRY_SEND_DEFAULT_PII: Whether to send PII (user emails and names,
+            LLM prompts and responses, INFO-level log breadcrumbs that contain
+            message text). Default: false
         SENTRY_ENVIRONMENT: Environment name (e.g., production, staging)
         SENTRY_RELEASE: Release/version string
-        SENTRY_PROFILE_SESSION_SAMPLE_RATE: Profile session sample rate. Default: 1.0
+        SENTRY_PROFILE_SESSION_SAMPLE_RATE: Profile session sample rate. Default: 0.1
         SENTRY_PROFILE_LIFECYCLE: Profile lifecycle mode. Default: trace
         SENTRY_ENABLE_LOGS: Enable Sentry logging integration. Default: true
 
@@ -76,14 +78,14 @@ def init_sentry() -> bool:
 
     try:
         # Parse configuration from environment variables
-        traces_sample_rate = float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0"))
+        traces_sample_rate = float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
         send_default_pii = _parse_bool(
-            os.getenv("SENTRY_SEND_DEFAULT_PII"), default=True
+            os.getenv("SENTRY_SEND_DEFAULT_PII"), default=False
         )
         environment: str | None = os.getenv("SENTRY_ENVIRONMENT")
         release: str | None = os.getenv("SENTRY_RELEASE")
         profile_session_sample_rate = float(
-            os.getenv("SENTRY_PROFILE_SESSION_SAMPLE_RATE", "1.0")
+            os.getenv("SENTRY_PROFILE_SESSION_SAMPLE_RATE", "0.1")
         )
         raw_lifecycle = os.getenv("SENTRY_PROFILE_LIFECYCLE", "trace")
         profile_lifecycle: Literal["manual", "trace"] = (
@@ -105,12 +107,16 @@ def init_sentry() -> bool:
             LiteLLMIntegration(),
         ]
 
-        # Add logging integration if enabled
+        # Add logging integration if enabled. INFO logs include user prompts
+        # and synced message text, so without PII only WARNING and above are
+        # recorded as breadcrumbs and Sentry logs.
         if enable_logs:
+            log_level = logging.INFO if send_default_pii else logging.WARNING
             integrations.append(
                 LoggingIntegration(
-                    level=logging.INFO,  # Capture info and above as breadcrumbs
+                    level=log_level,  # Breadcrumbs
                     event_level=logging.ERROR,  # Send errors as events
+                    sentry_logs_level=log_level,
                 )
             )
 
@@ -125,12 +131,16 @@ def init_sentry() -> bool:
             profile_lifecycle=profile_lifecycle,
             integrations=integrations,
             enable_logs=enable_logs,
+            # Stack frame locals hold prompts, thread history and tool
+            # results, so only attach them when PII may be sent.
+            include_local_variables=send_default_pii,
         )
 
         logger.info(
             "Sentry monitoring enabled "
-            "(traces_sample_rate=%.2f, environment=%s, release=%s)",
+            "(traces_sample_rate=%.2f, send_default_pii=%s, environment=%s, release=%s)",
             traces_sample_rate,
+            send_default_pii,
             environment or "default",
             release or "unknown",
         )
@@ -160,6 +170,9 @@ def set_user_context(
 ) -> None:
     """Set user context for Sentry events.
 
+    The email and display name are only attached when SENTRY_SEND_DEFAULT_PII
+    is enabled; otherwise only the opaque user ID is sent.
+
     Args:
         user_id: The unique user identifier.
         email: Optional user email.
@@ -169,10 +182,11 @@ def set_user_context(
         import sentry_sdk
 
         user_data = {"id": user_id}
-        if email:
-            user_data["email"] = email
-        if username:
-            user_data["username"] = username
+        if sentry_sdk.get_client().should_send_default_pii():
+            if email:
+                user_data["email"] = email
+            if username:
+                user_data["username"] = username
         sentry_sdk.set_user(user_data)
     except ImportError:
         pass  # Sentry not installed, silently ignore
