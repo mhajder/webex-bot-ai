@@ -20,11 +20,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python:3.14-alpine3.24
 LABEL org.opencontainers.image.title="Webex Bot AI" \
-    org.opencontainers.image.description="AI-powered Webex Bot" \
-    org.opencontainers.image.url="https://github.com/mhajder/webex-bot-ai" \
-    org.opencontainers.image.source="https://github.com/mhajder/webex-bot-ai" \
-    org.opencontainers.image.vendor="Mateusz Hajder" \
-    org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.description="AI-powered Webex Bot" \
+      org.opencontainers.image.url="https://github.com/mhajder/webex-bot-ai" \
+      org.opencontainers.image.documentation="https://github.com/mhajder/webex-bot-ai#readme" \
+      org.opencontainers.image.authors="Mateusz Hajder" \
+      org.opencontainers.image.source="https://github.com/mhajder/webex-bot-ai" \
+      org.opencontainers.image.vendor="Mateusz Hajder" \
+      org.opencontainers.image.licenses="MIT"
 ENV PYTHONUNBUFFERED=1
 
 RUN addgroup -g 10001 appuser \
