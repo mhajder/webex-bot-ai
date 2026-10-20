@@ -1,6 +1,7 @@
 """MCP (Model Context Protocol) client for connecting to multiple MCP servers."""
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -164,7 +165,7 @@ class MCPMultiClient:
                 transport = server_info.get("transport")
                 if hasattr(transport, "close") and callable(transport.close):
                     try:
-                        if asyncio.iscoroutinefunction(transport.close):
+                        if inspect.iscoroutinefunction(transport.close):
                             await transport.close()
                         else:
                             transport.close()

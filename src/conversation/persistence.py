@@ -371,7 +371,7 @@ class ConversationStore:
                         """,
                         (room_id, clean_query, limit),
                     )
-                    rows = await cursor.fetchall()
+                    rows = list(await cursor.fetchall())
                     if rows:
                         return [
                             Message(

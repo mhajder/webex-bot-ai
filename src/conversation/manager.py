@@ -194,6 +194,8 @@ class ConversationManager:
             kwargs["api_base"] = settings.llm.api_base
 
         response = litellm.completion(**kwargs)
+        if not isinstance(response, litellm.ModelResponse):
+            return ""
         if response.choices and response.choices[0].message.content:
             return response.choices[0].message.content.strip()
         return ""
