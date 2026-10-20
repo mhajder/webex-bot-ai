@@ -1,13 +1,17 @@
 """MCP (Model Context Protocol) client for connecting to multiple MCP servers."""
 
 import asyncio
-import inspect
 import logging
 from typing import Any
 
 from src.mcp_client.types import MCPTool, MCPToolResult
 
 log = logging.getLogger(__name__)
+
+# Names of the bot's built-in tools. MCP tools with these names are exposed
+# under the server-prefixed name, so they neither duplicate a tool definition
+# nor get shadowed by the built-in handler.
+RESERVED_TOOL_NAMES = frozenset({"search_room_history"})
 
 
 class MCPMultiClient:
@@ -28,6 +32,8 @@ class MCPMultiClient:
         self._servers: dict[str, dict[str, Any]] = {}
         self._tools: dict[str, MCPTool] = {}  # tool_name -> MCPTool
         self._tool_server_map: dict[str, str] = {}  # tool_name -> server_name
+        # exposed tool_name -> name the server knows the tool by
+        self._tool_original_names: dict[str, str] = {}
         self._connected = False
 
     @property
@@ -44,6 +50,10 @@ class MCPMultiClient:
     def available_tools(self) -> list[MCPTool]:
         """Get list of available tools from all connected servers."""
         return list(self._tools.values())
+
+    def get_tool(self, tool_name: str) -> MCPTool | None:
+        """Get a tool definition by its exposed name."""
+        return self._tools.get(tool_name)
 
     async def connect(
         self,
@@ -76,18 +86,12 @@ class MCPMultiClient:
             # Create transport and client
             transport = StreamableHttpTransport(url=url, headers=request_headers)
 
-            # Store server info
-            self._servers[name] = {
-                "url": url,
-                "headers": request_headers,
-                "tools": [],
-            }
-
             # Connect and discover tools
             async with Client(transport=transport) as client:
                 # List available tools
                 tools_result = await client.list_tools()
                 server_tools = []
+                discovered: list[tuple[str, str, MCPTool]] = []
 
                 for tool in tools_result:
                     input_schema = (
@@ -118,15 +122,24 @@ class MCPMultiClient:
                     )
 
                     tool_name = tool.name
-                    if tool_name in self._tools:
+                    if tool_name in self._tools or tool_name in RESERVED_TOOL_NAMES:
                         tool_name = f"{name}_{tool.name}"
                         mcp_tool.name = tool_name
 
-                    self._tools[tool_name] = mcp_tool
-                    self._tool_server_map[tool_name] = name
+                    discovered.append((tool_name, tool.name, mcp_tool))
                     server_tools.append(mcp_tool)
 
-                self._servers[name]["tools"] = server_tools
+                # Register the server only once discovery succeeded, so a failed
+                # connection leaves no half-registered server behind.
+                for tool_name, original_name, mcp_tool in discovered:
+                    self._tools[tool_name] = mcp_tool
+                    self._tool_server_map[tool_name] = name
+                    self._tool_original_names[tool_name] = original_name
+                self._servers[name] = {
+                    "url": url,
+                    "headers": request_headers,
+                    "tools": server_tools,
+                }
                 log.info(
                     "Connected to MCP server '%s'. Discovered %d tools.",
                     name,
@@ -153,26 +166,16 @@ class MCPMultiClient:
         """
         if name:
             if name in self._servers:
-                server_info = self._servers.pop(name)
+                # Each call opens and closes its own client session, so there is
+                # no persistent transport to close here.
+                self._servers.pop(name)
                 tools_to_remove = [
                     t for t, s in self._tool_server_map.items() if s == name
                 ]
                 for tool_name in tools_to_remove:
                     self._tools.pop(tool_name, None)
                     self._tool_server_map.pop(tool_name, None)
-
-                # Close transport if close method exists
-                transport = server_info.get("transport")
-                if hasattr(transport, "close") and callable(transport.close):
-                    try:
-                        if inspect.iscoroutinefunction(transport.close):
-                            await transport.close()
-                        else:
-                            transport.close()
-                    except Exception as e:
-                        log.debug(
-                            "Error closing transport for server '%s': %s", name, e
-                        )
+                    self._tool_original_names.pop(tool_name, None)
 
                 log.info("Disconnected from MCP server '%s'", name)
         else:
@@ -181,6 +184,7 @@ class MCPMultiClient:
                 await self.disconnect(s_name)
             self._tools.clear()
             self._tool_server_map.clear()
+            self._tool_original_names.clear()
             self._connected = False
             log.info("Disconnected from all MCP servers")
 
@@ -218,7 +222,7 @@ class MCPMultiClient:
             )
 
         try:
-            from fastmcp.client import Client
+            from fastmcp.client import Client, StreamableHttpTransport
 
             log.info(
                 "Calling MCP tool '%s' on server '%s' with args: %s",
@@ -227,22 +231,20 @@ class MCPMultiClient:
                 arguments,
             )
 
-            original_name = tool_name
-            if tool_name.startswith(f"{server_name}_"):
-                original_name = tool_name[len(f"{server_name}_") :]
-
-            from fastmcp.client import StreamableHttpTransport
+            original_name = self._tool_original_names.get(tool_name, tool_name)
 
             transport = StreamableHttpTransport(
                 url=server_info["url"],
                 headers=server_info.get("headers", {}),
             )
 
-            async with Client(transport=transport) as client:
-                result = await asyncio.wait_for(
-                    client.call_tool(original_name, arguments or {}),
-                    timeout=self.timeout,
-                )
+            # The timeout covers session setup as well as the call, so a server
+            # that hangs while connecting can't pin the caller's worker thread.
+            async with (
+                asyncio.timeout(self.timeout),
+                Client(transport=transport) as client,
+            ):
+                result = await client.call_tool(original_name, arguments or {})
 
                 if hasattr(result, "content"):
                     content_parts = [
