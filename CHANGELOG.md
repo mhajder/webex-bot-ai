@@ -1,3 +1,16 @@
+## v0.3.1 (2026-10-20)
+
+### Fix
+
+- **sentry**: stop sending PII and full traces by default
+- **main**: use the Webex display name and schedule DB cleanup
+- **ai**: fix tool calling, Webex history sync and prompt handling
+- **mcp**: keep tool names intact and bound call timeouts
+- **conversation**: make summarization, timeout and search work
+- **config**: load .env before settings and parse settings leniently
+- **docker**: run as numeric UID 10001 with root-owned app files
+- satisfy ty with the updated litellm typings
+
 ## v0.3.0 (2026-07-26)
 
 ### Feat
