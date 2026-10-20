@@ -1,7 +1,5 @@
 FROM python:3.14-alpine3.24 AS builder
 
-RUN apk add --no-cache build-base libffi-dev
-
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_DOWNLOADS=0
@@ -29,8 +27,7 @@ LABEL org.opencontainers.image.title="Webex Bot AI" \
     org.opencontainers.image.licenses="MIT"
 ENV PYTHONUNBUFFERED=1
 
-RUN apk add --no-cache ca-certificates \
-    && addgroup -g 10001 appuser \
+RUN addgroup -g 10001 appuser \
     && adduser -D -u 10001 -G appuser appuser \
     && mkdir -p /app/data \
     && chown 10001:10001 /app/data
