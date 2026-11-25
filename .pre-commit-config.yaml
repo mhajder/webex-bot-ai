@@ -72,3 +72,11 @@ repos:
         always_run: true
         stages:
           - pre-push
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        types: [ python ]
+        pass_filenames: false
+        always_run: true
