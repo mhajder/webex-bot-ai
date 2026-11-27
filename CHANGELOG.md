@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.3](https://github.com/mhajder/webex-bot-ai/compare/v0.3.2...v0.3.3) (2026-11-27)
+
+
+### 📦 Build
+
+* **deps:** pin litellm below 1.109 ([644cc24](https://github.com/mhajder/webex-bot-ai/commit/644cc24c4d1a5c6a4e0b3848b9088ab88520082f))
+* **docker:** harden runtime image and precompile bytecode ([3e3deac](https://github.com/mhajder/webex-bot-ai/commit/3e3deac1081f82a2c9a033c635fd18a1f4950760))
+
+
+### 🧪 Tests
+
+* add pytest suite, coverage config, and pre-commit hook ([abf482b](https://github.com/mhajder/webex-bot-ai/commit/abf482bf67c504169a4f97b8e518907054cf2a98))
+
 ## [0.3.2](https://github.com/mhajder/webex-bot-ai/compare/v0.3.1...v0.3.2) (2026-11-12)
 
 
